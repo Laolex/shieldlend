@@ -1,5 +1,5 @@
 import { BrowserProvider, Contract, parseEther } from "ethers";
-import { createInstance } from "../../node_modules/@zama-fhe/relayer-sdk/web.js";
+import { createInstance } from "./vendor/relayer-sdk/web.js";
 import { useCallback, useEffect, useState } from "react";
 import ABI from "./abi.json";
 import { CONTRACT_ADDRESS } from "./config";
