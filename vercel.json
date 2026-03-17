@@ -21,5 +21,6 @@
       "source": "/api/zama-relay/:path*",
       "destination": "/api/zama-relay"
     }
-  ]
+  ],
+  "installCommand": "echo skip"
 }
