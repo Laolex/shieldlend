@@ -12,8 +12,9 @@ let borrower1: HardhatEthersSigner;
 let borrower2: HardhatEthersSigner;
 let liquidator: HardhatEthersSigner;
 
-async function encryptUint64(signer: HardhatEthersSigner, amount: bigint) {
-  const r = await fhevm.encryptUint(FhevmType.euint64, amount, contractAddress, signer.address);
+async function encryptUint64(signer: HardhatEthersSigner, amount: bigint, addr?: string) {
+  const target = addr ?? contractAddress;
+  const r = await fhevm.encryptUint(FhevmType.euint64, amount, target, signer.address);
   return {
     externalEuint: ethers.hexlify(r.externalEuint as any),
     inputProof: ethers.hexlify(r.inputProof as any),
@@ -205,6 +206,72 @@ describe("ConfidentialLending", function () {
       await expect(contract.connect(borrower1).deposit(externalEuint, inputProof, { value: 1000n }))
         .to.be.reverted;
       await (await contract.unpause()).wait();
+    });
+  });
+
+  // ── Public Decryption (FHE.makePubliclyDecryptable) ──────────────────────
+  describe("Public Decryption — Liquidation Reveal", function () {
+    let revBorrower: HardhatEthersSigner;
+    let revContract: any;
+    let revAddress: string;
+
+    before(async function () {
+      [,,,,,, revBorrower] = await ethers.getSigners();
+      const factory = await ethers.getContractFactory("ConfidentialLending");
+      revContract = await factory.deploy();
+      await revContract.waitForDeployment();
+      revAddress = await revContract.getAddress();
+      await revContract.grantLiquidatorRole(liquidator.address);
+
+      // Setup: borrower deposits 30000 and borrows 5000 (safe, not liquidatable)
+      const { externalEuint: ce, inputProof: cp } = await encryptUint64(revBorrower, 30000n, revAddress);
+      await (await revContract.connect(revBorrower).deposit(ce, cp, { value: 30000n })).wait();
+      const { externalEuint: be, inputProof: bp } = await encryptUint64(revBorrower, 5000n, revAddress);
+      await (await revContract.connect(revBorrower).borrow(be, bp)).wait();
+    });
+
+    it("requestLiquidationReveal sets pendingReveal and emits LiquidationRevealRequested", async function () {
+      const tx = await revContract.requestLiquidationReveal(revBorrower.address);
+      const receipt = await tx.wait();
+      expect(await revContract.isPendingReveal(revBorrower.address)).to.be.true;
+      // Event check
+      const iface = revContract.interface;
+      const evt = receipt?.logs
+        .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
+        .find((e: any) => e?.name === "LiquidationRevealRequested");
+      expect(evt).to.not.be.undefined;
+      expect(evt!.args.borrower).to.equal(revBorrower.address);
+    });
+
+    it("publicDecryptEbool confirms position is not liquidatable", async function () {
+      const handle = await revContract.getIsLiquidatable(revBorrower.address);
+      const handleHex = ethers.hexlify(handle as any);
+      const isLiq = await fhevm.publicDecryptEbool(handleHex);
+      expect(isLiq).to.be.false;
+    });
+
+    it("verifyLiquidationReveal emits LiquidationAlertPublic and clears pendingReveal", async function () {
+      const handle = await revContract.getIsLiquidatable(revBorrower.address);
+      const handleHex = ethers.hexlify(handle as any);
+
+      const result = await fhevm.publicDecrypt([handleHex]);
+
+      const tx = await revContract.verifyLiquidationReveal(
+        revBorrower.address,
+        [handleHex],
+        result.abiEncodedClearValues,
+        result.decryptionProof
+      );
+      const receipt = await tx.wait();
+
+      expect(await revContract.isPendingReveal(revBorrower.address)).to.be.false;
+
+      const iface = revContract.interface;
+      const evt = receipt?.logs
+        .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
+        .find((e: any) => e?.name === "LiquidationAlertPublic");
+      expect(evt).to.not.be.undefined;
+      expect(evt!.args.isLiquidatable).to.be.false;
     });
   });
 });
