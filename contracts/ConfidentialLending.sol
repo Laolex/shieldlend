@@ -31,6 +31,7 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
     }
 
     mapping(address => Position) private positions;
+    mapping(address => bool) private pendingLiquidationReveal;
     address[] public borrowerList;
 
     // ─── Protocol constants (plaintext — public knowledge) ─────────────────
@@ -49,6 +50,8 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
     event Liquidated(address indexed borrower, address indexed liquidator, uint256 timestamp);
     event InterestAccrued(address indexed borrower, uint256 timestamp);
     event CreditScoreUpdated(address indexed borrower, uint256 timestamp);
+    event LiquidationRevealRequested(address indexed borrower, bytes32 isLiquidatableHandle, uint256 timestamp);
+    event LiquidationAlertPublic(address indexed borrower, bool isLiquidatable, uint256 timestamp);
 
     constructor() {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
@@ -243,6 +246,48 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
         FHE.allowThis(pos.interestRate);
 
         emit CreditScoreUpdated(borrower, block.timestamp);
+    }
+
+    // ─────────────────────────── Public Decryption ─────────────────────────
+
+    /**
+     * @notice Mark a position's liquidation status for public decryption by the Zama relayer.
+     *         Anyone can request a reveal — the result is broadcast via LiquidationAlertPublic event.
+     */
+    function requestLiquidationReveal(address borrower) external {
+        require(positions[borrower].active, "No active position");
+        ebool liqFlag = positions[borrower].isLiquidatable;
+        FHE.makePubliclyDecryptable(liqFlag);
+        pendingLiquidationReveal[borrower] = true;
+        emit LiquidationRevealRequested(borrower, FHE.toBytes32(liqFlag), block.timestamp);
+    }
+
+    /**
+     * @notice Submit the Zama relayer's decryption result + proof for a pending liquidation reveal.
+     *         Verifies KMS signatures via FHE.checkSignatures, then broadcasts the plaintext result.
+     * @param borrower              Address whose isLiquidatable was decrypted
+     * @param handlesList           Array containing the ebool handle (bytes32)
+     * @param abiEncodedCleartexts  ABI-encoded bool from relayer
+     * @param decryptionProof       KMS signatures + metadata from relayer
+     */
+    function verifyLiquidationReveal(
+        address borrower,
+        bytes32[] calldata handlesList,
+        bytes calldata abiEncodedCleartexts,
+        bytes calldata decryptionProof
+    ) external {
+        require(pendingLiquidationReveal[borrower], "No pending reveal for this borrower");
+        FHE.checkSignatures(handlesList, abiEncodedCleartexts, decryptionProof);
+        bool isLiquidatable = abi.decode(abiEncodedCleartexts, (bool));
+        delete pendingLiquidationReveal[borrower];
+        emit LiquidationAlertPublic(borrower, isLiquidatable, block.timestamp);
+    }
+
+    /**
+     * @notice Returns whether a liquidation reveal is pending for a given borrower.
+     */
+    function isPendingReveal(address borrower) external view returns (bool) {
+        return pendingLiquidationReveal[borrower];
     }
 
     // ─────────────────────────── View functions ────────────────────────────
