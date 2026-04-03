@@ -264,6 +264,17 @@ export default function ShieldLendApp() {
     setLoading(false);
   };
 
+  const handleRequestReveal = async (addr: string) => {
+    if (!contract) return;
+    setLoading(true);
+    try {
+      const tx = await contract.requestLiquidationReveal(addr);
+      await tx.wait();
+      showToast(`Reveal requested for ${addr.slice(0, 6)}… — Zama relayer will decrypt`, "info");
+    } catch (e: any) { showToast(e.message?.slice(0, 80), "error"); }
+    setLoading(false);
+  };
+
   const modalTitle = modal === "deposit" ? "Deposit Collateral" : modal === "borrow" ? "Borrow Against Collateral" : "Repay Debt";
   const modalSub   = modal === "deposit"
     ? "Amount encrypted client-side via Zama FHE before submission. Contract never sees plaintext."
@@ -381,9 +392,15 @@ export default function ShieldLendApp() {
                         <div style={{ fontSize:12, fontFamily:"Space Mono,monospace", marginBottom:4 }}>{addr.slice(0,10)}…{addr.slice(-6)}</div>
                         <span className="enc-tag">🔒 health factor encrypted</span>
                       </div>
-                      <button className="sl-btn-danger" onClick={() => handleLiquidate(addr)} disabled={loading}>
-                        {loading ? <span className="sl-spinner" /> : "Liquidate"}
-                      </button>
+                      <div style={{ display:"flex", gap:8 }}>
+                        <button className="sl-btn-ghost" onClick={() => handleRequestReveal(addr)} disabled={loading}
+                          title="Mark isLiquidatable for public decryption by Zama relayer">
+                          {loading ? <span className="sl-spinner" /> : "🔓 Request Reveal"}
+                        </button>
+                        <button className="sl-btn-danger" onClick={() => handleLiquidate(addr)} disabled={loading}>
+                          {loading ? <span className="sl-spinner" /> : "Liquidate"}
+                        </button>
+                      </div>
                     </div>
                   ))
                 )}
