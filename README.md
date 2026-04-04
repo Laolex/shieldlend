@@ -1,129 +1,166 @@
-# 🔐 ShieldPay — Confidential On-Chain Payroll
+# ShieldLend — Confidential Overcollateralized Lending
 
-> Built for the **Zama fhEVM Hackathon** · Powered by Fully Homomorphic Encryption
+> Built for the **Zama fhEVM Season 2 Hackathon** · Powered by Fully Homomorphic Encryption
 
 [![Zama fhEVM](https://img.shields.io/badge/Built%20with-Zama%20fhEVM-blueviolet)](https://docs.zama.ai)
 [![Solidity](https://img.shields.io/badge/Solidity-0.8.24-blue)](https://soliditylang.org)
-[![Tests](https://img.shields.io/badge/Tests-27%2F27%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/Tests-22%2F22%20passing-brightgreen)]()
 [![Network](https://img.shields.io/badge/Network-Sepolia-orange)]()
 
 **Contract:**
-[`0x0AC5A3D3b0787BC97F101a75854bbEC62EE97cc6`](https://sepolia.etherscan.io/address/0x0AC5A3D3b0787BC97F101a75854bbEC62EE97cc6)  
+[`0xFC0f1744d3cF752Bdd67c0BA4b0CaD4048f7376A`](https://sepolia.etherscan.io/address/0xFC0f1744d3cF752Bdd67c0BA4b0CaD4048f7376A)  
 **Frontend:**
-[shieldpay-delta.vercel.app](https://shieldpay-delta.vercel.app)
+[frontend-sigma-seven-16.vercel.app](https://frontend-sigma-seven-16.vercel.app)
 
 ---
 
 ## The Problem
 
-Public blockchains are radically transparent. Every salary, bonus, and tax payment is visible to anyone — employees see
-each other's pay, competitors infer burn rate, and sensitive financial data is permanently public.
+Every loan on a public blockchain is visible to the world. Competitors can see your collateral ratio, liquidators can front-run your position, and your borrowing history is permanently public. DeFi privacy isn't optional for institutional or high-value borrowers.
 
-ShieldPay solves this using Fully Homomorphic Encryption. Payroll arithmetic runs entirely on encrypted values,
-on-chain, with zero plaintext ever touching the blockchain.
+ShieldLend solves this using Fully Homomorphic Encryption. Collateral amounts, loan sizes, interest rates, credit scores, and health factors are all computed inside FHE ciphertexts — the protocol enforces overcollateralization and liquidation rules **without ever seeing plaintext values**.
 
 ---
 
 ## How It Works
 
-### Encrypted Payroll Arithmetic
+### Encrypted Lending Math
 
-```
-encGross  = FHE.add(encSalary, encBonus)   // add encrypted values
-encTax    = FHE.shr(encGross, 2)           // right-shift = ÷4 ≈ 25% withholding
-encNet    = FHE.sub(encGross, encTax)      // subtract encrypted tax
+All core protocol logic runs on encrypted values:
+
+```solidity
+// Borrow: health factor computed entirely in FHE
+euint64 collateralScaled = FHE.mul(pos.collateral, FHE.asEuint64(100));
+euint64 debtScaled       = FHE.mul(pos.totalDebt,  FHE.asEuint64(150)); // 150% ratio
+pos.isLiquidatable       = FHE.lt(collateralScaled, debtScaled);
+
+// Interest accrual: totalDebt * interestRate / 10000 — all encrypted
+euint64 interest = FHE.div(FHE.mul(pos.totalDebt, pos.interestRate), 10000);
+pos.totalDebt    = FHE.add(pos.totalDebt, interest);
+
+// Credit score → interest rate discount: all encrypted
+euint64 discount     = FHE.div(FHE.div(newScore, 2), 100);
+pos.interestRate     = FHE.sub(FHE.asEuint64(BASE_RATE_BPS), discount);
 ```
 
-All three operations execute directly on `euint64` ciphertexts. The contract never sees plaintext amounts at any point.
+No plaintext amount, rate, or health factor is ever stored or computed in the clear.
 
 ### Encryption Flow (Client → Chain)
 
 ```
 Browser (fhevmjs)
-  └─ encryptUint(salary, contractAddress, userAddress)
+  └─ encryptUint(depositAmount, contractAddress, userAddress)
        → externalEuint64 handle + ZK inputProof
             │
             ▼
-  ConfidentialPayroll.sol
-  └─ FHE.fromExternal(handle, inputProof)  // verify + store as euint64
-  └─ FHE.allow(euint64, employeeAddress)   // grant ACL access
-  └─ FHE.allowThis(euint64)                // contract retains access
+  ConfidentialLending.sol
+  └─ FHE.fromExternal(handle, inputProof)  // verify proof + store as euint64
+  └─ FHE.allowThis(euint64)               // contract retains ACL access
+  └─ FHE.allow(euint64, msg.sender)       // borrower can re-encrypt/view
 ```
 
-### Decryption Flow (Chain → Employee)
+### Public Decryption — Liquidation Reveal
+
+The liquidation health check (`isLiquidatable`) is an FHE-computed `ebool`. Anyone can request it be publicly revealed without exposing the underlying collateral or debt values:
 
 ```
-Employee wallet signs EIP-712 message (proves ownership)
-  └─ fhevmInst.generateKeypair()           // ephemeral keypair in browser
-  └─ fhevmInst.createEIP712(pubKey, contractAddress)
-  └─ wallet.signTypedData(eip712)
-  └─ fhevmInst.reencrypt(handle, privKey, pubKey, signature, contract, account)
-       │
-       ▼
-  Zama Relayer (relayer.testnet.zama.org)
-  └─ Verifies ACL permission on-chain
-  └─ Re-encrypts ciphertext under employee ephemeral pubKey
-  └─ Returns encrypted value → browser decrypts locally
-       │
-       ▼
-  Plaintext salary — never stored, never transmitted, visible only in browser memory
+1. requestLiquidationReveal(borrower)
+   └─ FHE.makePubliclyDecryptable(pos.isLiquidatable)
+   └─ emit LiquidationRevealRequested(borrower, handle)
+
+2. Zama relayer decrypts the ebool off-chain
+
+3. verifyLiquidationReveal(borrower, handles, cleartexts, proof)
+   └─ FHE.checkSignatures(handles, cleartexts, proof)  // verify KMS signatures
+   └─ bool isLiq = abi.decode(cleartexts, (bool))
+   └─ emit LiquidationAlertPublic(borrower, isLiq)
 ```
 
-> **Testnet note:** The Zama testnet relayer does not currently send CORS headers, blocking browser-initiated reencrypt
-> requests. The decryption logic is fully implemented and correct — this is a testnet infrastructure limitation. The
-> flow works end-to-end in the Hardhat test environment using `userDecryptEuint`.
+**The health factor stays encrypted.** The world only learns whether a position crossed the liquidation threshold — not the exact collateral ratio.
 
 ---
 
 ## Contract Architecture
 
 ```
-ConfidentialPayroll.sol
-├── ZamaEthereumConfig          // sets FHE coprocessor addresses
-├── AccessControlEnumerable     // EMPLOYER_ROLE, AUDITOR_ROLE
+ConfidentialLending.sol
+├── ZamaEthereumConfig          // Zama FHE coprocessor addresses
+├── AccessControlEnumerable     // ADMIN_ROLE, LIQUIDATOR_ROLE
 ├── ReentrancyGuard
+├── Pausable
 │
-├── Storage (all encrypted)
-│   ├── euint64 baseSalary
-│   ├── euint64 bonus
-│   ├── euint64 totalPaid       // cumulative
-│   └── euint64 taxWithheld     // cumulative
+├── Position (per borrower, all encrypted)
+│   ├── euint64 collateral       // deposited ETH in wei
+│   ├── euint64 loanAmount       // principal borrowed
+│   ├── euint64 interestRate     // per-user rate in bps (credit-score gated)
+│   ├── euint64 totalDebt        // principal + accrued interest
+│   ├── euint64 creditScore      // 0–1000 encrypted score
+│   └── ebool   isLiquidatable   // FHE.lt(collateral*100, debt*150)
 │
-├── Payroll Logic
-│   ├── addEmployee()           // encrypt + store salary, grant ACL
-│   ├── setBonus()              // encrypt + store bonus
-│   ├── executePayrollCycle()   // FHE.add / FHE.shr / FHE.sub on all employees
-│   └── _allowEmployers()       // grant ACL to all current employers
+├── Core Functions
+│   ├── deposit()                // encrypt collateral + init position
+│   ├── borrow()                 // add debt + recompute health factor
+│   ├── repay()                  // reduce debt + recompute health factor
+│   ├── accrueInterest()         // encrypted per-user compound interest
+│   ├── liquidate()              // LIQUIDATOR_ROLE only
+│   └── updateCreditScore()      // ADMIN_ROLE — sets encrypted score + rate
 │
-└── View Functions (ACL-gated)
-    ├── getEncryptedSalary()
-    ├── getEncryptedTotalPaid()
-    └── getEncryptedTaxWithheld()
+└── Public Decryption
+    ├── requestLiquidationReveal()    // makePubliclyDecryptable + emit handle
+    ├── verifyLiquidationReveal()     // checkSignatures + emit plaintext result
+    └── isPendingReveal()             // view — check reveal status
 ```
+
+---
+
+## Protocol Constants (Plaintext)
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `COLLATERAL_RATIO` | 150 | 150% overcollateralization required |
+| `MIN_HEALTH_FACTOR` | 110 | Liquidation threshold |
+| `BASE_RATE_BPS` | 500 | 5% base annual interest rate |
+| `MAX_LOAN_RATIO` | 66 | Max 66% of collateral can be borrowed |
+
+Protocol rules are public; position sizes are private.
 
 ---
 
 ## Test Results
 
 ```
-27 passing  (0 failing)
+22 passing  (0 failing)
 
-Core FHE math:
-  ✓ salary 5000 + bonus 1000 = gross 6000
-  ✓ tax = 6000 >> 2 = 1500  (25% via FHE.shr)
-  ✓ net = 6000 - 1500 = 4500
-  ✓ totalPaid accumulates correctly across cycles
-  ✓ taxWithheld accumulates correctly
+Deposit:
+  ✓ initializes position with encrypted collateral and default credit score
+  ✓ adds to existing collateral on second deposit
+
+Borrow:
+  ✓ increases encrypted totalDebt
+  ✓ sets isLiquidatable based on FHE.lt health factor check
+
+Repay:
+  ✓ reduces totalDebt and loanAmount via FHE.sub
+
+Interest accrual:
+  ✓ increases totalDebt by encrypted interest calculation
+
+Liquidate:
+  ✓ only LIQUIDATOR_ROLE can liquidate
+  ✓ zeroes position and sets active = false
+
+Credit score:
+  ✓ ADMIN_ROLE sets encrypted credit score
+  ✓ lower interest rate computed from higher score via FHE.div
 
 Access control:
-  ✓ EMPLOYER_ROLE gates all payroll operations
-  ✓ employees can only decrypt their own salary (ACL)
-  ✓ auditors can read encrypted handles
+  ✓ non-admin cannot update credit score
+  ✓ non-liquidator cannot liquidate
 
-Other:
-  ✓ pause / unpause
-  ✓ multi-employee payroll cycle
-  ✓ bonus clears after each cycle
+Public Decryption — Liquidation Reveal:
+  ✓ requestLiquidationReveal sets pendingReveal and emits LiquidationRevealRequested
+  ✓ publicDecryptEbool confirms position is not liquidatable
+  ✓ verifyLiquidationReveal emits LiquidationAlertPublic and clears pendingReveal
 ```
 
 ---
@@ -131,8 +168,8 @@ Other:
 ## Local Setup
 
 ```bash
-git clone https://github.com/Laolex/shieldpay
-cd shieldpay
+git clone https://github.com/Laolex/shieldlend
+cd shieldlend
 npm install
 npx hardhat test
 ```
@@ -145,26 +182,49 @@ npm install
 npm run dev   # http://localhost:5173
 ```
 
+Connect MetaMask to Sepolia. The deployed contract address is already configured in `frontend/src/config.ts`.
+
+---
+
+## Deployment
+
+Deploy to Sepolia:
+
+```bash
+npx hardhat deploy --network sepolia
+```
+
+Generate Etherscan verification input:
+
+```bash
+node -e "
+const fs = require('fs');
+const f = fs.readdirSync('artifacts/build-info').find(f => f.endsWith('.json'));
+const bi = JSON.parse(fs.readFileSync('artifacts/build-info/' + f));
+fs.writeFileSync('std_input.json', JSON.stringify(bi.input, null, 2));
+"
+```
+
+Upload `std_input.json` to Etherscan → Verify & Publish → Solidity (Standard-Json-Input).
+
 ---
 
 ## Stack
 
-| Layer                | Technology                       |
-| -------------------- | -------------------------------- |
-| FHE Contract Library | `@fhevm/solidity` v0.11.1        |
-| FHE Client SDK       | `@zama-fhe/relayer-sdk` v0.4.1   |
-| Smart Contract       | Solidity 0.8.24 + OpenZeppelin   |
-| Network              | Ethereum Sepolia                 |
-| Frontend             | React + Vite + ethers.js v6      |
-| Testing              | Hardhat + fhEVM mock coprocessor |
+| Layer | Technology |
+|-------|------------|
+| FHE Contract Library | `@fhevm/solidity` v0.11.1 |
+| FHE Client SDK | `@zama-fhe/relayer-sdk` v0.4.1 |
+| Smart Contract | Solidity 0.8.24 + OpenZeppelin |
+| Network | Ethereum Sepolia |
+| Frontend | React + Vite + ethers.js v6 |
+| Testing | Hardhat + fhEVM mock coprocessor |
 
 ---
 
-## What Makes ShieldPay Different
+## What Makes ShieldLend Different
 
-Most "confidential payroll" solutions encrypt data off-chain and store hashes on-chain. ShieldPay performs the actual
-arithmetic — addition, division, subtraction — inside FHE ciphertexts, on-chain, verified by the Zama coprocessor. No
-trusted intermediary ever sees plaintext payroll data.
+Most DeFi lending protocols compute collateral ratios in plaintext, making every position visible on-chain. ShieldLend moves all arithmetic — addition, multiplication, division, comparison — inside FHE ciphertexts. The protocol enforces the 150% collateral requirement and liquidation threshold **homomorphically**: the health check produces an encrypted boolean that is only revealed (via the Zama KMS relayer) when needed for liquidation, and even then only reveals a single bit — not the underlying amounts.
 
 ---
 
