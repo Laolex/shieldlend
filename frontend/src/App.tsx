@@ -191,6 +191,12 @@ const STYLES = `
   .sl-token-symbol{font-size:11px;font-weight:700;color:var(--text);}
   .sl-token-name{font-size:9px;color:var(--muted);letter-spacing:0.08em;}
 
+  /* ── Admin panel ── */
+  .sl-admin-card{border-color:rgba(251,191,36,0.2)!important;}
+  .sl-admin-card:hover{border-color:rgba(251,191,36,0.4)!important;box-shadow:0 0 30px rgba(251,191,36,0.08)!important;}
+  .sl-admin-card::before{background:linear-gradient(90deg,transparent,rgba(251,191,36,0.3),transparent)!important;}
+  .sl-admin-card .sl-tab.active{background:linear-gradient(135deg,rgba(251,191,36,0.15),rgba(251,191,36,0.05));color:var(--warn);border-color:rgba(251,191,36,0.3);}
+
   /* ── Wallet dropdown ── */
   .sl-wallet-wrap{position:relative;}
   .sl-wallet-btn{display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:20px;padding:5px 14px;cursor:pointer;font-size:11px;font-family:'Space Mono',monospace;color:var(--text);transition:border-color 0.2s,background 0.2s;}
@@ -226,6 +232,15 @@ export default function ShieldLendApp() {
   const [walletMenu, setWalletMenu]     = useState(false);
   const [selectedToken, setSelectedToken] = useState<TokenSymbol>("ETH");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [protocolStats, setProtocolStats] = useState<{
+    protocolReserve: bigint; totalReserves: bigint; effectiveRateBps: bigint;
+    ethSupplyCap: bigint; maxBorrowPerPosition: bigint;
+    reserveFactorBps: bigint; minReserveRatioBps: bigint;
+  } | null>(null);
+  const [adminTab, setAdminTab]   = useState<"reserve" | "rate" | "caps" | "emergency">("reserve");
+  const [adminA, setAdminA]       = useState("");
+  const [adminB, setAdminB]       = useState("");
+  const [adminC, setAdminC]       = useState("");
 
   useEffect(() => {
     const id = "sl-styles";
@@ -323,6 +338,7 @@ export default function ShieldLendApp() {
       setCloseStep(pendingClose ? "pending" : "idle");
 
       if (isLiq || isAdm) await loadBorrowers(c);
+      await loadProtocolStats(c);
 
       showToast(`Connected: ${addr.slice(0,6)}...${addr.slice(-4)}`);
     } catch (e: any) { showToast(e.message?.slice(0, 80), "error"); }
@@ -334,6 +350,22 @@ export default function ShieldLendApp() {
     setHasPosition(false); setBorrowers([]); setWalletMenu(false);
     setCloseStep("idle");
     if (pollRef.current) clearInterval(pollRef.current);
+  };
+
+  const loadProtocolStats = async (c: Contract) => {
+    try {
+      const [pr, tr, erb, esc, mbp, rfb, mrr] = await Promise.all([
+        c.protocolReserve(), c.totalReserves(), c.effectiveRateBps(),
+        c.ethSupplyCap(), c.maxBorrowPerPosition(),
+        c.reserveFactorBps(), c.minReserveRatioBps(),
+      ]);
+      setProtocolStats({
+        protocolReserve: BigInt(pr), totalReserves: BigInt(tr),
+        effectiveRateBps: BigInt(erb), ethSupplyCap: BigInt(esc),
+        maxBorrowPerPosition: BigInt(mbp), reserveFactorBps: BigInt(rfb),
+        minReserveRatioBps: BigInt(mrr),
+      });
+    } catch {}
   };
 
   const loadBorrowers = async (c: Contract) => {
@@ -533,6 +565,73 @@ export default function ShieldLendApp() {
     setLoading(false);
   };
 
+  // ─── Admin v2 actions ────────────────────────────────────────────────────────
+  const handleReplenishReserve = async () => {
+    if (!contract || !adminA) return;
+    setLoading(true);
+    try {
+      const tx = await contract.replenishReserve({ value: parseEther(adminA) });
+      await tx.wait();
+      setAdminA("");
+      showToast(`Reserve topped up with ${adminA} ETH`);
+      await loadProtocolStats(contract);
+    } catch (e: any) { showToast(e.message?.slice(0, 80), "error"); }
+    setLoading(false);
+  };
+
+  const handleSetRateParams = async () => {
+    if (!contract || !adminA || !adminB || !adminC) return;
+    setLoading(true);
+    try {
+      const tx = await contract.setRateParams(Number(adminA), Number(adminB), Number(adminC));
+      await tx.wait();
+      setAdminA(""); setAdminB(""); setAdminC("");
+      showToast("Rate model updated");
+      await loadProtocolStats(contract);
+    } catch (e: any) { showToast(e.message?.slice(0, 80), "error"); }
+    setLoading(false);
+  };
+
+  const handleSetReserveParams = async () => {
+    if (!contract || !adminA || !adminB) return;
+    setLoading(true);
+    try {
+      const tx = await contract.setReserveParams(BigInt(adminA), BigInt(adminB));
+      await tx.wait();
+      setAdminA(""); setAdminB("");
+      showToast("Reserve params updated");
+      await loadProtocolStats(contract);
+    } catch (e: any) { showToast(e.message?.slice(0, 80), "error"); }
+    setLoading(false);
+  };
+
+  const handleSetCaps = async () => {
+    if (!contract) return;
+    setLoading(true);
+    try {
+      const supCap = adminA ? parseEther(adminA) : 0n;
+      const borCap = adminB ? parseEther(adminB) : 0n;
+      const tx = await contract.setCaps(supCap, borCap);
+      await tx.wait();
+      setAdminA(""); setAdminB("");
+      showToast("Caps updated (0 = uncapped)");
+      await loadProtocolStats(contract);
+    } catch (e: any) { showToast(e.message?.slice(0, 80), "error"); }
+    setLoading(false);
+  };
+
+  const handleEmergencyLiquidate = async (addr: string) => {
+    if (!contract) return;
+    setLoading(true);
+    try {
+      const tx = await contract.emergencyLiquidate(addr);
+      await tx.wait();
+      setBorrowers(prev => prev.filter(b => b.address !== addr));
+      showToast(`Emergency liquidated ${addr.slice(0,6)}...`, "info");
+    } catch (e: any) { showToast(e.message?.slice(0, 80), "error"); }
+    setLoading(false);
+  };
+
   // ─── Render helpers ──────────────────────────────────────────────────────────
   const modalTitle = modal === "deposit" ? "Deposit Collateral"
     : modal === "borrow"  ? "Borrow Against Collateral"
@@ -599,10 +698,26 @@ export default function ShieldLendApp() {
         )
       ) : (
         <>
-          <div className="sl-info-row"><span style={{ color:"var(--muted)",fontSize:13 }}>Collateral Ratio</span><span style={{ fontSize:13 }}>150%</span></div>
-          <div className="sl-info-row"><span style={{ color:"var(--muted)",fontSize:13 }}>Base Interest Rate</span><span style={{ fontSize:13 }}>5% <span style={{ color:"var(--muted)" }}>(500 bps)</span></span></div>
-          <div className="sl-info-row"><span style={{ color:"var(--muted)",fontSize:13 }}>Max Loan Ratio</span><span style={{ fontSize:13 }}>66% of collateral</span></div>
-          <div className="sl-info-row"><span style={{ color:"var(--muted)",fontSize:13 }}>Liquidation Threshold</span><span style={{ fontSize:13 }}>110% <span className="enc-tag">ebool</span></span></div>
+          <div className="sl-info-row">
+            <span style={{ color:"var(--muted)",fontSize:13 }}>Effective Rate</span>
+            <span style={{ fontSize:13 }}>{protocolStats ? `${protocolStats.effectiveRateBps} bps (${Number(protocolStats.effectiveRateBps)/100}%)` : "500 bps"}</span>
+          </div>
+          <div className="sl-info-row">
+            <span style={{ color:"var(--muted)",fontSize:13 }}>Protocol Reserve</span>
+            <span style={{ fontSize:13 }}>{protocolStats ? `${(Number(protocolStats.protocolReserve)/1e18).toFixed(6)} ETH` : "—"}</span>
+          </div>
+          <div className="sl-info-row">
+            <span style={{ color:"var(--muted)",fontSize:13 }}>Total Reserves</span>
+            <span style={{ fontSize:13 }}>{protocolStats ? `${(Number(protocolStats.totalReserves)/1e18).toFixed(6)} ETH` : "—"}</span>
+          </div>
+          <div className="sl-info-row">
+            <span style={{ color:"var(--muted)",fontSize:13 }}>Supply Cap</span>
+            <span style={{ fontSize:13 }}>{protocolStats ? (protocolStats.ethSupplyCap === 0n ? "uncapped" : `${(Number(protocolStats.ethSupplyCap)/1e18).toFixed(4)} ETH`) : "—"}</span>
+          </div>
+          <div className="sl-info-row">
+            <span style={{ color:"var(--muted)",fontSize:13 }}>Reserve Factor</span>
+            <span style={{ fontSize:13 }}>{protocolStats ? `${protocolStats.reserveFactorBps} bps (${Number(protocolStats.reserveFactorBps)/100}%)` : "—"}</span>
+          </div>
           <div className="sl-info-row"><span style={{ color:"var(--muted)",fontSize:13 }}>Network</span><span style={{ fontSize:13 }}>Sepolia Testnet</span></div>
           <div className="sl-info-row">
             <span style={{ color:"var(--muted)",fontSize:13 }}>Lending Contract</span>
@@ -656,6 +771,11 @@ export default function ShieldLendApp() {
               + Interest
             </button>
           )}
+          {isAdmin && (
+            <button className="sl-btn-danger" onClick={() => handleEmergencyLiquidate(b.address)} disabled={loading} style={{ fontSize:11 }}>
+              ⚡ Emergency
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -677,6 +797,138 @@ export default function ShieldLendApp() {
       }
     </div>
   );
+
+  const renderAdminPanel = () => {
+    const fmtEth = (v: bigint) => v === 0n ? "uncapped" : `${(Number(v)/1e18).toFixed(4)} ETH`;
+    const s = protocolStats;
+    return (
+      <div className="sl-card sl-admin-card">
+        <div className="sl-section-title" style={{ color:"var(--warn)" }}>Admin Panel</div>
+        <div className="sl-tab-row">
+          {(["reserve","rate","caps","emergency"] as const).map(t => (
+            <button key={t} className={`sl-tab ${adminTab === t ? "active" : ""}`}
+              onClick={() => { setAdminTab(t); setAdminA(""); setAdminB(""); setAdminC(""); }}>
+              {t === "reserve" ? "Reserve" : t === "rate" ? "Rate Model" : t === "caps" ? "Caps" : "Emergency"}
+            </button>
+          ))}
+        </div>
+
+        {adminTab === "reserve" && (
+          <>
+            <div className="sl-info-row">
+              <span style={{ color:"var(--muted)", fontSize:12 }}>Protocol Reserve</span>
+              <span style={{ fontSize:13, color:"var(--accent2)" }}>{s ? `${(Number(s.protocolReserve)/1e18).toFixed(6)} ETH` : "—"}</span>
+            </div>
+            <div className="sl-info-row">
+              <span style={{ color:"var(--muted)", fontSize:12 }}>Total Reserves</span>
+              <span style={{ fontSize:13 }}>{s ? `${(Number(s.totalReserves)/1e18).toFixed(6)} ETH` : "—"}</span>
+            </div>
+            <div className="sl-info-row">
+              <span style={{ color:"var(--muted)", fontSize:12 }}>Reserve Factor</span>
+              <span style={{ fontSize:13 }}>{s ? `${s.reserveFactorBps} bps` : "—"}</span>
+            </div>
+            <div className="sl-info-row">
+              <span style={{ color:"var(--muted)", fontSize:12 }}>Min Reserve Ratio</span>
+              <span style={{ fontSize:13 }}>{s ? (s.minReserveRatioBps === 0n ? "disabled" : `${s.minReserveRatioBps} bps`) : "—"}</span>
+            </div>
+            <div className="sl-divider" />
+            <div style={{ fontSize:11, color:"var(--muted)", marginBottom:8 }}>Replenish Reserve</div>
+            <div style={{ display:"flex", gap:8 }}>
+              <input className="sl-input" style={{ marginBottom:0 }} type="number" step="0.001" min="0"
+                placeholder="ETH amount" value={adminA} onChange={e => setAdminA(e.target.value)} />
+              <button className="sl-btn" disabled={loading || !adminA} onClick={handleReplenishReserve} style={{ whiteSpace:"nowrap" }}>
+                {loading ? <span className="sl-spinner" /> : "Top Up"}
+              </button>
+            </div>
+            <div style={{ fontSize:11, color:"var(--muted)", marginTop:16, marginBottom:8 }}>Set Reserve Params (factor bps, min ratio bps)</div>
+            <div style={{ display:"flex", gap:8 }}>
+              <input className="sl-input" style={{ marginBottom:0 }} type="number" placeholder="Factor bps (e.g. 200)" value={adminA} onChange={e => setAdminA(e.target.value)} />
+              <input className="sl-input" style={{ marginBottom:0 }} type="number" placeholder="Min ratio bps (0=off)" value={adminB} onChange={e => setAdminB(e.target.value)} />
+              <button className="sl-btn" disabled={loading || !adminA || !adminB} onClick={handleSetReserveParams} style={{ whiteSpace:"nowrap" }}>
+                {loading ? <span className="sl-spinner" /> : "Set"}
+              </button>
+            </div>
+          </>
+        )}
+
+        {adminTab === "rate" && (
+          <>
+            <div className="sl-info-row">
+              <span style={{ color:"var(--muted)", fontSize:12 }}>Effective Rate</span>
+              <span style={{ fontSize:13, color:"var(--accent2)" }}>{s ? `${s.effectiveRateBps} bps (${Number(s.effectiveRateBps)/100}%)` : "—"}</span>
+            </div>
+            <div className="sl-divider" />
+            <div style={{ fontSize:11, color:"var(--muted)", marginBottom:8 }}>
+              Set Rate Params — base bps · utilization bps · max uplift bps
+            </div>
+            <div style={{ fontSize:10, color:"var(--muted)", marginBottom:12 }}>
+              Effective rate = base + (utilization × maxUplift / 10000). Example: 500 · 5000 · 400 → 700bps (7%)
+            </div>
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+              <input className="sl-input" style={{ marginBottom:0, flex:1, minWidth:100 }} type="number" placeholder="Base bps" value={adminA} onChange={e => setAdminA(e.target.value)} />
+              <input className="sl-input" style={{ marginBottom:0, flex:1, minWidth:100 }} type="number" placeholder="Utilization bps" value={adminB} onChange={e => setAdminB(e.target.value)} />
+              <input className="sl-input" style={{ marginBottom:0, flex:1, minWidth:100 }} type="number" placeholder="Max uplift bps" value={adminC} onChange={e => setAdminC(e.target.value)} />
+              <button className="sl-btn" disabled={loading || !adminA || !adminB || !adminC} onClick={handleSetRateParams} style={{ whiteSpace:"nowrap" }}>
+                {loading ? <span className="sl-spinner" /> : "Update Rate"}
+              </button>
+            </div>
+          </>
+        )}
+
+        {adminTab === "caps" && (
+          <>
+            <div className="sl-info-row">
+              <span style={{ color:"var(--muted)", fontSize:12 }}>ETH Supply Cap</span>
+              <span style={{ fontSize:13 }}>{s ? fmtEth(s.ethSupplyCap) : "—"}</span>
+            </div>
+            <div className="sl-info-row">
+              <span style={{ color:"var(--muted)", fontSize:12 }}>Max Borrow Per Position</span>
+              <span style={{ fontSize:13 }}>{s ? fmtEth(s.maxBorrowPerPosition) : "—"}</span>
+            </div>
+            <div className="sl-divider" />
+            <div style={{ fontSize:11, color:"var(--muted)", marginBottom:8 }}>
+              Set Caps — supply cap ETH · max collateral per position ETH (0 = uncapped)
+            </div>
+            <div style={{ display:"flex", gap:8 }}>
+              <input className="sl-input" style={{ marginBottom:0 }} type="number" step="0.001" placeholder="Supply cap (ETH, 0=off)" value={adminA} onChange={e => setAdminA(e.target.value)} />
+              <input className="sl-input" style={{ marginBottom:0 }} type="number" step="0.001" placeholder="Per-position cap (ETH, 0=off)" value={adminB} onChange={e => setAdminB(e.target.value)} />
+              <button className="sl-btn" disabled={loading} onClick={handleSetCaps} style={{ whiteSpace:"nowrap" }}>
+                {loading ? <span className="sl-spinner" /> : "Set Caps"}
+              </button>
+            </div>
+          </>
+        )}
+
+        {adminTab === "emergency" && (
+          <>
+            <div style={{ fontSize:11, color:"var(--muted)", marginBottom:16, lineHeight:1.7 }}>
+              Emergency liquidation bypasses the reveal flow — admin can close any position immediately
+              without waiting for the Zama relayer to confirm the health factor.
+            </div>
+            {borrowers.length === 0
+              ? <div className="sl-empty"><div className="sl-empty-icon">✓</div>No active positions</div>
+              : borrowers.map(b => (
+                <div className="sl-borrower-item" key={b.address} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12 }}>
+                  <div>
+                    <div style={{ fontSize:12, fontFamily:"Space Mono,monospace", marginBottom:4 }}>
+                      {b.address.slice(0,10)}...{b.address.slice(-6)}
+                    </div>
+                    <div style={{ display:"flex", gap:6 }}>
+                      {b.confirmedLiq && <span className="sl-step-pill danger">confirmed liq</span>}
+                      {b.pendingReveal && <span className="sl-step-pill pending">reveal pending</span>}
+                    </div>
+                  </div>
+                  <button className="sl-btn-danger" onClick={() => handleEmergencyLiquidate(b.address)} disabled={loading}>
+                    {loading ? <span className="sl-spinner" /> : "⚡ Emergency Liquidate"}
+                  </button>
+                </div>
+              ))
+            }
+          </>
+        )}
+      </div>
+    );
+  };
 
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
@@ -767,15 +1019,17 @@ export default function ShieldLendApp() {
                 </div>
               </div>
               <div className="sl-card">
-                <div className="sl-card-label">Protocol Reserves</div>
-                <div style={{ paddingTop:6 }}>
-                  <span className="enc-tag">🔒 euint64</span>
+                <div className="sl-card-label">Protocol Reserve</div>
+                <div className="sl-card-value" style={{ fontSize:20 }}>
+                  {protocolStats ? `${(Number(protocolStats.protocolReserve)/1e18).toFixed(4)}` : "—"}
                 </div>
+                {protocolStats && <div style={{ fontSize:10, color:"var(--muted)", marginTop:2 }}>ETH · rate {protocolStats.effectiveRateBps}bps</div>}
               </div>
             </div>
 
             {(role === "borrower" || isAdmin) && renderBorrowerCard()}
             {(role === "liquidator" || isAdmin) && renderLiquidatorCard()}
+            {isAdmin && renderAdminPanel()}
             {account && ethProvider && SCORE_CONTRACT_ADDRESS && (
               <ShieldScore
                 account={account}
