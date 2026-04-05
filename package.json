@@ -24,6 +24,7 @@
     "hardhat"
   ],
   "dependencies": {
+    "@chainlink/contracts": "^1.4.0",
     "@fhevm/mock-utils": "^0.4.2",
     "@fhevm/solidity": "^0.11.1",
     "encrypted-types": "^0.0.4",
@@ -85,6 +86,8 @@
     "chain": "hardhat node --network hardhat --no-deploy",
     "deploy:localhost": "hardhat deploy --network localhost",
     "deploy:sepolia": "hardhat deploy --network sepolia",
+    "deploy-all:sepolia": "hardhat run scripts/deploy-all.ts --network sepolia",
+    "deploy-all:localhost": "hardhat run scripts/deploy-all.ts --network localhost",
     "verify:sepolia": "hardhat verify --network sepolia",
     "start:fhevm": "bash ./scripts/start-local-fhevm.sh"
   },

@@ -243,7 +243,9 @@ export default function ShieldLendApp() {
 
   const encryptAmount = async (value: bigint) => {
     if (!fhevmInst || !account) throw new Error("FHE not initialized");
-    const r = await fhevmInst.encryptUint({ value, type: "euint64", contractAddress: CONTRACT_ADDRESS, callerAddress: account });
+    const input = fhevmInst.createEncryptedInput(CONTRACT_ADDRESS, account);
+    input.add64(value);
+    const r = await input.encrypt();
     const { ethers } = await import("ethers");
     return { handle: ethers.hexlify(r.handles[0]), proof: ethers.hexlify(r.inputProof) };
   };
@@ -517,7 +519,9 @@ export default function ShieldLendApp() {
     setLoading(true);
     try {
       if (!fhevmInst) throw new Error("FHE unavailable");
-      const r = await fhevmInst.encryptUint({ value: BigInt(scoreTarget), type: "euint64", contractAddress: CONTRACT_ADDRESS, callerAddress: account });
+      const input = fhevmInst.createEncryptedInput(CONTRACT_ADDRESS, account!);
+      input.add64(BigInt(scoreTarget));
+      const r = await input.encrypt();
       const { ethers } = await import("ethers");
       const handle = ethers.hexlify(r.handles[0]);
       const proof  = ethers.hexlify(r.inputProof);
