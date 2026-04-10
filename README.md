@@ -16,17 +16,40 @@
 
 ---
 
-## The Problem
+## Why This Matters
 
-Every loan on a public blockchain is visible to the world. Competitors can see your collateral ratio, liquidators can front-run your position, and your borrowing history is permanently public. DeFi privacy isn't optional for institutional or high-value borrowers.
+DeFi lending today has a fundamental privacy problem. When Alice deposits 100 ETH on Aave, **everyone** can see:
+- Her exact collateral balance
+- How much she borrowed
+- Her health factor (and exactly when she can be liquidated)
+- Her complete borrowing history
 
-ShieldLend solves this using Fully Homomorphic Encryption. Collateral amounts, loan sizes, interest rates, credit scores, and health factors are all computed inside FHE ciphertexts — the protocol enforces overcollateralization and liquidation rules **without ever seeing plaintext values**.
+This creates real damage:
+
+- **Competitors** track institutional borrowing positions to front-run trades
+- **MEV bots** snipe liquidations by watching health factors approach thresholds
+- **Credit history** is permanently public — a single bad position follows you forever
+
+For DeFi to serve institutional and high-net-worth users, lending needs to work like traditional finance: **the protocol enforces the rules without seeing the data.**
+
+### How ShieldLend Solves This
+
+ShieldLend moves *all* lending arithmetic inside FHE ciphertexts. The protocol computes collateral ratios, interest accrual, and liquidation thresholds homomorphically — it enforces overcollateralization **without ever knowing the amounts involved.**
+
+**Scenario: Alice borrows privately**
+
+1. Alice deposits 10 ETH. The amount is encrypted client-side via the Zama relayer SDK before reaching the chain — the contract stores it as an `euint64` ciphertext.
+2. Alice borrows against her collateral. The contract computes `collateral * 100 < debt * 150` entirely in FHE to check the health factor — producing an encrypted boolean `ebool`.
+3. The protocol accrues interest via `FHE.mul` and `FHE.add` on encrypted values. Alice's rate is personalized by her encrypted ShieldScore credit rating — without the protocol seeing the score.
+4. If Alice's health factor deteriorates, anyone can request a **single-bit reveal**: the `ebool isLiquidatable` is publicly decrypted via the Zama KMS relayer. The world learns only *whether* she's underwater — not her collateral ratio, debt, or score.
+
+**What the blockchain sees:** encrypted blobs. **What the protocol enforces:** 150% overcollateralization, 66% max LTV, interest accrual, liquidation thresholds — all verified homomorphically.
 
 ---
 
 ## Architecture
 
-ShieldLend is two contracts that work together:
+ShieldLend is two composable contracts:
 
 ```
 ConfidentialLending.sol       — core lending protocol (deposit, borrow, repay, liquidate)
@@ -97,7 +120,7 @@ The liquidation health check (`isLiquidatable`) is an FHE-computed `ebool`. Anyo
 
 ```
 contracts/
-├── ConfidentialLending.sol
+├── ConfidentialLending.sol (745 lines)
 │   ├── Roles: ADMIN_ROLE, LIQUIDATOR_ROLE
 │   ├── Position (all encrypted per borrower)
 │   │   ├── euint64 collateral
@@ -109,16 +132,37 @@ contracts/
 │   ├── deposit / borrow / repay / accrueInterest
 │   ├── requestLiquidationReveal / verifyLiquidationReveal / liquidate
 │   ├── requestClosePosition / verifyAndClose
+│   ├── Admin: oracle, rate model, caps, reserve, emergency liquidation
 │   └── setScoreContract(addr)       // ADMIN_ROLE — wire in ShieldScore
 │
 └── shieldscore/
-    └── ConfidentialCreditScore.sol  (ShieldScore module)
+    └── ConfidentialCreditScore.sol (295 lines) — ShieldScore module
         ├── Roles: ORACLE_ROLE, REVIEWER_ROLE
         ├── euint64 score per subject  (ACL: subject + oracle)
         ├── setScore / getEncryptedScore / meetsThreshold / hasScore
         └── Dispute system
             ├── openDispute / castDisputeVote (euint8 encrypted votes)
             └── requestDisputeResolve / verifyDisputeResolve
+```
+
+### Frontend Architecture
+
+```
+frontend/src/
+├── App.tsx                      — thin orchestrator, state management
+├── components/
+│   ├── Header.tsx               — wallet connection, FHE status, role badge
+│   ├── Hero.tsx                 — landing page with feature cards
+│   ├── StatsBar.tsx             — protocol stats overview
+│   ├── BorrowerCard.tsx         — position management (deposit/borrow/repay/decrypt)
+│   ├── LiquidatorCard.tsx       — borrower monitoring + liquidation flow
+│   ├── AdminPanel.tsx           — reserve, rate model, caps, emergency controls
+│   ├── Modals.tsx               — deposit, borrow/repay, score, result modals
+│   └── Toast.tsx                — notification system
+├── ShieldScore.tsx              — standalone credit score panel
+├── styles.ts                    — design system (Space Mono + Syne typography)
+├── types.ts                     — shared TypeScript types
+└── config.ts                    — contract addresses, token config
 ```
 
 ---
@@ -136,11 +180,70 @@ contracts/
 
 | Tier | Score | Collateral Ratio |
 |------|-------|-----------------|
-| Premium | ≥ 800 | 110% |
-| Standard | ≥ 600 | 130% |
+| Premium | >= 800 | 110% |
+| Standard | >= 600 | 130% |
 | Base | < 600 | 150% |
 
 Score comparisons are done via `FHE.select` — the contract never sees the raw score, only an encrypted boolean result.
+
+---
+
+## Interest Accrual & the Keeper Bot
+
+Because summing all encrypted position debts on-chain would break FHE privacy, interest accrual is triggered externally. ShieldLend includes a **keeper script** (`scripts/keeper.ts`) that:
+
+1. Iterates over all active borrowers via `borrowerList`
+2. Calls `accrueInterest(borrower)` for each position
+3. Logs results with transaction hashes
+
+In production, this runs as a cron job or systemd timer:
+
+```bash
+# Accrue interest every 6 hours
+0 */6 * * * cd /path/to/shieldlend && \
+  PRIVATE_KEY=0x... npx hardhat run scripts/keeper.ts --network sepolia
+```
+
+This is an intentional design choice: automated on-chain utilization tracking would require aggregating encrypted debt values, which fundamentally contradicts FHE privacy guarantees. The keeper approach preserves per-position confidentiality while maintaining protocol health.
+
+---
+
+## Credit Score Oracle — Production Path
+
+ShieldScore's `ORACLE_ROLE` currently sets scores via admin. In production, this would connect to a privacy-preserving credit scoring pipeline:
+
+```
+                                        ┌─────────────────────┐
+                                        │  ShieldScore Oracle  │
+                                        │  (off-chain service) │
+                                        └────────┬────────────┘
+                                                 │
+                    ┌────────────────────────────┼────────────────────────────┐
+                    │                            │                            │
+         ┌──────────▼──────────┐    ┌────────────▼──────────┐    ┌───────────▼──────────┐
+         │  On-Chain History   │    │  Cross-Protocol Data  │    │  Off-Chain Signals    │
+         │  - Repayment record │    │  - Aave/Compound      │    │  - KYC provider       │
+         │  - Liquidation count│    │  - Uniswap LP history │    │  - Credit bureau API  │
+         │  - Position age     │    │  - ENS/governance     │    │  - Employer oracle    │
+         └─────────────────────┘    └───────────────────────┘    └──────────────────────┘
+                                                 │
+                                    ┌────────────▼────────────┐
+                                    │  Score Computation      │
+                                    │  (0–1000, off-chain)    │
+                                    │  weighted model output  │
+                                    └────────────┬────────────┘
+                                                 │
+                                    ┌────────────▼────────────┐
+                                    │  Encrypt & Submit       │
+                                    │  fhevmjs.encryptUint()  │
+                                    │  → setScore(subject,    │
+                                    │     handle, proof)      │
+                                    └─────────────────────────┘
+```
+
+The oracle encrypts the score client-side before submission — **even the oracle contract never stores a plaintext score.** The lending protocol only sees `meetsThreshold()` results as encrypted booleans, preserving creditworthiness privacy end-to-end.
+
+Future enhancements could use **zkTLS** or **TEE attestations** to prove the off-chain data sources without revealing them, creating a fully verifiable yet private credit scoring pipeline.
 
 ---
 
@@ -204,10 +307,10 @@ After deployment:
 2. Set `VITE_SCORE_CONTRACT_ADDRESS` in `frontend/.env`
 3. Push to Vercel — env vars can also be set in Vercel dashboard
 
-### Deploy lending only
+### Run the keeper
 
 ```bash
-hardhat run scripts/deploy.ts --network sepolia
+PRIVATE_KEY=0x... npx hardhat run scripts/keeper.ts --network sepolia
 ```
 
 ### Etherscan Verification (Standard JSON Input)
@@ -236,14 +339,24 @@ Upload `std_input.json` → Etherscan → Verify & Publish → Solidity (Standar
 | Frontend | React 19 + Vite + ethers.js v6 |
 | Deploy | Vercel (frontend + API edge functions) |
 | Testing | Hardhat + fhEVM mock coprocessor |
+| Keeper | Hardhat script + cron |
 
 ---
 
-## What Makes ShieldLend Different
+## FHE Patterns Used
 
-Most DeFi lending protocols compute collateral ratios in plaintext, making every position visible on-chain. ShieldLend moves all arithmetic — addition, multiplication, division, comparison — inside FHE ciphertexts. The protocol enforces the 150% collateral requirement and liquidation threshold **homomorphically**: the health check produces an encrypted boolean that is only revealed (via the Zama KMS relayer) when needed for liquidation, and even then reveals only a single bit — not the underlying amounts.
+ShieldLend demonstrates 8 distinct FHE patterns from the Zama fhEVM toolkit:
 
-ShieldScore extends this further: credit scores are set by an off-chain oracle, stored as `euint64` ciphertexts, and gate both collateral ratios and interest rates without ever being exposed to the protocol. Disputes are resolved by reviewers casting encrypted votes (`euint8`) that are tallied via `FHE.add` — the protocol learns only the outcome, not how each reviewer voted.
+| Pattern | Where Used |
+|---------|-----------|
+| `FHE.fromExternal` + `inputProof` | Every user input (deposit, borrow, repay, score) |
+| `FHE.add` / `FHE.sub` / `FHE.mul` / `FHE.div` | Interest accrual, collateral aggregation, rate computation |
+| `FHE.lt` (encrypted comparison) | Health factor check → `ebool isLiquidatable` |
+| `FHE.select` (encrypted branching) | Credit score tier → collateral ratio selection |
+| `FHE.allow` / `FHE.allowThis` (ACL) | Per-user ciphertext access control |
+| `FHE.makePubliclyDecryptable` | Liquidation reveal, debt-zero check, dispute resolution |
+| `FHE.checkSignatures` | Verifying Zama KMS relayer decryption proofs |
+| `euint8` encrypted voting | Dispute system — tallied via `FHE.add`, never revealing individual votes |
 
 ---
 

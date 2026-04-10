@@ -24,3 +24,4 @@ coverage.json
 pnpm-lock.yaml
 yarn.lock
 .vercel
+note.md
