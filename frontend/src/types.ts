@@ -1,5 +1,5 @@
 export type Role = "borrower" | "liquidator" | "admin" | null;
-export type ModalType = "deposit" | "borrow" | "repay" | "result" | "score" | null;
+export type ModalType = "deposit" | "borrow" | "repay" | "score" | null;
 export type Toast = { message: string; kind: "success" | "error" | "info" } | null;
 export type CloseStep = "idle" | "pending" | "done";
 

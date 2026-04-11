@@ -5,6 +5,7 @@ import ABI from "./abi.json";
 import { CONTRACT_ADDRESS, SCORE_CONTRACT_ADDRESS, CHAIN_ID, TOKENS, type TokenSymbol } from "./config";
 import { injectStyles } from "./styles";
 import type { Role, ModalType, Toast as ToastType, CloseStep, BorrowerEntry, ProtocolStats } from "./types";
+import type { DecryptPhase } from "./components/BorrowerCard";
 
 import Header from "./components/Header";
 import Hero from "./components/Hero";
@@ -12,8 +13,11 @@ import StatsBar from "./components/StatsBar";
 import BorrowerCard from "./components/BorrowerCard";
 import LiquidatorCard from "./components/LiquidatorCard";
 import AdminPanel from "./components/AdminPanel";
-import { DepositModal, AmountModal, ScoreModal, ResultModal } from "./components/Modals";
+import { DepositModal, AmountModal, ScoreModal } from "./components/Modals";
 import Toast from "./components/Toast";
+import WalletBalances from "./components/WalletBalances";
+import ComputationOverlay from "./ui/ComputationOverlay";
+import { useUiPhase } from "./ui/useUiPhase";
 import ShieldScore from "./ShieldScore";
 
 const ERC20_ABI = [
@@ -23,6 +27,8 @@ const ERC20_ABI = [
 ];
 
 export default function ShieldLendApp() {
+  const { setPhase: setUiPhase } = useUiPhase();
+  const [appLaunched, setAppLaunched] = useState(false);
   const [account, setAccount]         = useState<string | null>(null);
   const [ethProvider, setEthProvider]  = useState<BrowserProvider | null>(null);
   const [contract, setContract]       = useState<Contract | null>(null);
@@ -34,11 +40,12 @@ export default function ShieldLendApp() {
   const [modal, setModal]             = useState<ModalType>(null);
   const [loading, setLoading]         = useState(false);
   const [toast, setToast]             = useState<ToastType>(null);
-  const [resultMsg, setResultMsg]     = useState("");
   const [closeStep, setCloseStep]     = useState<CloseStep>("idle");
   const [activeTab, setActiveTab]     = useState<"position" | "protocol">("position");
   const [walletMenu, setWalletMenu]   = useState(false);
   const [protocolStats, setProtocolStats] = useState<ProtocolStats | null>(null);
+  const [decryptPhase, setDecryptPhase] = useState<DecryptPhase>("encrypted");
+  const [decryptedValues, setDecryptedValues] = useState<Record<string, string> | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => { injectStyles(); }, []);
@@ -107,13 +114,15 @@ export default function ShieldLendApp() {
     const eth = (window as any).ethereum;
     if (!eth) { showToast("No wallet \u2014 install Rabby or MetaMask", "info"); return; }
     try {
-      const provider = new BrowserProvider(eth);
+      let provider = new BrowserProvider(eth);
       await provider.send("eth_requestAccounts", []);
 
       const network = await provider.getNetwork();
       if (Number(network.chainId) !== CHAIN_ID) {
         try {
           await provider.send("wallet_switchEthereumChain", [{ chainId: `0x${CHAIN_ID.toString(16)}` }]);
+          // Re-create provider after chain switch (ethers v6 invalidates on network change)
+          provider = new BrowserProvider(eth);
         } catch {
           showToast("Please switch to Sepolia testnet", "error");
           return;
@@ -123,10 +132,12 @@ export default function ShieldLendApp() {
       const signer = await provider.getSigner();
       const addr = await signer.getAddress();
       setAccount(addr);
+      setUiPhase("connecting");
 
       let inst: any = null;
       try {
         await initSDK();
+        setUiPhase("encrypting");
         showToast("Connecting to FHE relayer\u2026", "info");
         inst = await Promise.race([
           createInstance({ ...SepoliaConfig, network: eth, relayerUrl: `${window.location.origin}/api/zama-relay` }),
@@ -143,6 +154,7 @@ export default function ShieldLendApp() {
         }
       }
       setFhevmInst(inst);
+      setUiPhase("connected");
 
       const c = new Contract(CONTRACT_ADDRESS, ABI, signer);
       setContract(c);
@@ -169,16 +181,21 @@ export default function ShieldLendApp() {
     setAccount(null); setEthProvider(null); setContract(null);
     setFhevmInst(null); setRole(null); setIsAdmin(false);
     setHasPosition(false); setBorrowers([]); setWalletMenu(false);
-    setCloseStep("idle");
+    setCloseStep("idle"); setDecryptPhase("encrypted"); setDecryptedValues(null);
+    setUiPhase("disconnected");
     if (pollRef.current) clearInterval(pollRef.current);
   };
 
   // ─── Borrower actions ──────────────────────────────────────────────────────
   const handleDeposit = async (amount: string, selectedToken: TokenSymbol) => {
-    if (!contract || !account || !amount || !ethProvider) return;
+    if (!contract || !account || !amount || !ethProvider) {
+      showToast(`Missing: ${!contract ? "contract" : ""} ${!account ? "account" : ""} ${!amount ? "amount" : ""} ${!ethProvider ? "provider" : ""}`.trim(), "error");
+      return;
+    }
     setLoading(true);
     try {
-      if (!fhevmInst) throw new Error("FHE unavailable \u2014 wait for FHE online");
+      if (!fhevmInst) throw new Error("FHE unavailable \u2014 wait for FHE online (check header status)");
+      setUiPhase("encrypting");
       const token = TOKENS.find(t => t.symbol === selectedToken)!;
       const ethWeiEquiv = toEthWei(amount, token);
       const { handle, proof } = await encryptAmount(ethWeiEquiv);
@@ -205,34 +222,42 @@ export default function ShieldLendApp() {
 
       setHasPosition(true);
       setModal(null);
+      setUiPhase("connected");
       showToast(`${amount} ${selectedToken} deposited as collateral`);
-    } catch (e: any) { showToast(e.message?.slice(0, 80), "error"); }
+    } catch (e: any) { setUiPhase("connected"); showToast(e.message?.slice(0, 80), "error"); }
     setLoading(false);
   };
 
   const handleBorrow = async (amount: string) => {
-    if (!contract || !account || !amount) return;
+    if (!contract || !account) { showToast("Wallet not connected", "error"); return; }
+    if (!amount) { showToast("Enter an amount", "error"); return; }
     setLoading(true);
     try {
-      if (!fhevmInst) throw new Error("FHE unavailable");
+      if (!fhevmInst) throw new Error("FHE unavailable — wait for relayer (check header status)");
+      setUiPhase("encrypting");
       const { handle, proof } = await encryptAmount(parseEther(amount));
+      showToast("Submitting borrow tx...", "info");
       const tx = await contract.borrow(handle, proof);
       await tx.wait();
       setModal(null);
-      showToast("Borrow recorded \u2014 debt encrypted on-chain");
-    } catch (e: any) { showToast(e.message?.slice(0, 80), "error"); }
+      setUiPhase("connected");
+      showToast("Borrow recorded — debt encrypted on-chain");
+    } catch (e: any) { setUiPhase("connected"); showToast(e.message?.slice(0, 80), "error"); }
     setLoading(false);
   };
 
   const handleRepay = async (amount: string) => {
-    if (!contract || !account || !amount) return;
+    if (!contract || !account) { showToast("Wallet not connected", "error"); return; }
+    if (!amount) { showToast("Enter an amount", "error"); return; }
     setLoading(true);
     try {
       if (!fhevmInst) throw new Error("FHE unavailable");
+      setUiPhase("encrypting");
       const { handle, proof } = await encryptAmount(parseEther(amount));
       const tx = await contract.repay(handle, proof);
       await tx.wait();
       setModal(null);
+      setUiPhase("connected");
       showToast("Repayment applied");
     } catch (e: any) { showToast(e.message?.slice(0, 80), "error"); }
     setLoading(false);
@@ -254,35 +279,65 @@ export default function ShieldLendApp() {
     if (!contract || !account) return;
     if (!fhevmInst) { showToast("FHE offline \u2014 relayer unreachable", "error"); return; }
     setLoading(true);
+    setDecryptPhase("computing");
+    setUiPhase("computing");
     try {
-      const [collHandle, debtHandle, rateHandle, scoreHandle] = await Promise.all([
+      const [collHandle, debtHandle, rateHandle, scoreHandle, liqHandle] = await Promise.all([
         contract.getEncryptedCollateral(account),
         contract.getEncryptedTotalDebt(account),
         contract.getEncryptedInterestRate(account),
         contract.getEncryptedCreditScore(account),
+        contract.getIsLiquidatable(account),
       ]);
       const { publicKey, privateKey } = fhevmInst.generateKeypair();
-      const eip712 = fhevmInst.createEIP712(publicKey, CONTRACT_ADDRESS);
+
+      // SDK v0.4.1: createEIP712(pubKey, contractAddresses[], startTimestamp, durationDays)
+      const now = Math.floor(Date.now() / 1000);
+      const eip712 = fhevmInst.createEIP712(publicKey, [CONTRACT_ADDRESS], now, 1);
       const provider = new BrowserProvider((window as any).ethereum);
       const signer = await provider.getSigner();
-      const sig = await signer.signTypedData(eip712.domain, { Reencrypt: eip712.types.Reencrypt }, eip712.message);
+      const typeName = eip712.types.Reencrypt ? "Reencrypt" : Object.keys(eip712.types).find((k: string) => k !== "EIP712Domain")!;
+      const sig = await signer.signTypedData(eip712.domain, { [typeName]: eip712.types[typeName] }, eip712.message);
 
-      const [collateral, debt, rate, score] = await Promise.all([
-        fhevmInst.reencrypt(collHandle, privateKey, publicKey, sig, CONTRACT_ADDRESS, account),
-        fhevmInst.reencrypt(debtHandle, privateKey, publicKey, sig, CONTRACT_ADDRESS, account),
-        fhevmInst.reencrypt(rateHandle, privateKey, publicKey, sig, CONTRACT_ADDRESS, account),
-        fhevmInst.reencrypt(scoreHandle, privateKey, publicKey, sig, CONTRACT_ADDRESS, account),
-      ]);
-
-      const fmtWei = (v: bigint) => `${v} wei  (${(Number(v) / 1e18).toFixed(6)} ETH)`;
-      setResultMsg(
-        `Collateral:    ${fmtWei(collateral)}\n` +
-        `Total Debt:    ${fmtWei(debt)}\n` +
-        `Interest Rate: ${rate} bps  (${Number(rate) / 100}%)\n` +
-        `Credit Score:  ${score} / 1000`
+      // SDK v0.4.1: userDecrypt(HandleContractPair[], privKey, pubKey, sig, contractAddresses[], userAddr, startTs, days)
+      const handles = [collHandle, debtHandle, rateHandle, scoreHandle, liqHandle].map(
+        (h: string) => ({ handle: h, contractAddress: CONTRACT_ADDRESS })
       );
-      setModal("result");
-    } catch (e: any) { showToast(e.message?.slice(0, 80), "error"); }
+      const results = await fhevmInst.userDecrypt(
+        handles, privateKey, publicKey, sig,
+        [CONTRACT_ADDRESS], account, now, 1,
+      );
+
+      // Results is Record<handleHex, bigint|boolean|string>
+      const vals = Object.values(results);
+      const [collateral, debt, rate, score, isLiq] = vals as [bigint, bigint, bigint, bigint, boolean];
+
+      // Store raw ciphertext handles for the "on-chain view"
+      const handleHexes = [collHandle, debtHandle, rateHandle, scoreHandle, liqHandle].map(
+        (h: string) => typeof h === "string" ? h : String(h)
+      );
+
+      const fmtWei = (v: bigint) => `${(Number(v) / 1e18).toFixed(6)} ETH`;
+      setDecryptedValues({
+        collateral: fmtWei(collateral),
+        debt: fmtWei(debt),
+        rate: `${rate} bps (${Number(rate) / 100}%)`,
+        score: `${score} / 1000`,
+        health: isLiq ? "At Risk" : "Healthy",
+        // Ciphertext handles for on-chain view
+        _handle_collateral: handleHexes[0],
+        _handle_debt: handleHexes[1],
+        _handle_rate: handleHexes[2],
+        _handle_score: handleHexes[3],
+        _handle_health: handleHexes[4],
+      });
+      setDecryptPhase("decrypted");
+      setUiPhase("decrypted");
+    } catch (e: any) {
+      setDecryptPhase("encrypted");
+      setUiPhase("connected");
+      showToast(e.message?.slice(0, 80), "error");
+    }
     setLoading(false);
   };
 
@@ -357,6 +412,7 @@ export default function ShieldLendApp() {
   // ─── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="sl-app">
+      <ComputationOverlay />
       <Header
         account={account} role={role} isAdmin={isAdmin} fhevmInst={fhevmInst}
         walletMenu={walletMenu} setWalletMenu={setWalletMenu}
@@ -364,8 +420,17 @@ export default function ShieldLendApp() {
       />
 
       <div className="sl-main">
-        {!account ? (
-          <Hero onConnect={connect} />
+        {!account && !appLaunched ? (
+          <Hero onConnect={() => setAppLaunched(true)} />
+        ) : !account ? (
+          <div className="sl-hero" style={{ paddingTop: 60, paddingBottom: 40 }}>
+            <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 24 }}>
+              Connect your wallet to interact with the protocol
+            </div>
+            <button className="sl-btn-hero" onClick={connect}>
+              Connect Wallet &rarr;
+            </button>
+          </div>
         ) : (
           <>
             <StatsBar
@@ -373,6 +438,10 @@ export default function ShieldLendApp() {
               hasPosition={hasPosition}
               protocolStats={protocolStats}
             />
+
+            {ethProvider && (
+              <WalletBalances account={account!} provider={ethProvider} showToast={showToast} />
+            )}
 
             {(role === "borrower" || isAdmin) && (
               <BorrowerCard
@@ -382,6 +451,8 @@ export default function ShieldLendApp() {
                 fhevmInst={fhevmInst} protocolStats={protocolStats}
                 setModal={setModal} onDecrypt={handleDecrypt}
                 onRequestClose={handleRequestClose}
+                decryptPhase={decryptPhase}
+                decryptedValues={decryptedValues}
               />
             )}
 
@@ -406,7 +477,7 @@ export default function ShieldLendApp() {
               />
             )}
 
-            {account && ethProvider && SCORE_CONTRACT_ADDRESS && (
+            {account && ethProvider && SCORE_CONTRACT_ADDRESS && (role === "borrower" || isAdmin) && (
               <ShieldScore
                 account={account} provider={ethProvider}
                 fhevmInst={fhevmInst} isOracle={isAdmin}
@@ -428,10 +499,6 @@ export default function ShieldLendApp() {
       {modal === "score" && (
         <ScoreModal loading={loading} onSubmit={handleUpdateScore} onClose={() => setModal(null)} />
       )}
-      {modal === "result" && (
-        <ResultModal resultMsg={resultMsg} onClose={() => setModal(null)} />
-      )}
-
       <Toast toast={toast} />
     </div>
   );

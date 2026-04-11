@@ -72,6 +72,29 @@ export const STYLES = `
   /* ── Encrypted tag ── */
   .enc-tag{font-size:11px;color:var(--enc);background:var(--enc-bg);border:1px solid var(--enc-border);border-radius:6px;padding:2px 10px;font-family:'Space Mono',monospace;letter-spacing:0.04em;}
 
+  /* ── Encrypted shimmer (FHE state: data hidden) ── */
+  @keyframes enc-shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+  .enc-shimmer{display:inline-block;min-width:80px;height:18px;border-radius:4px;background:linear-gradient(110deg,rgba(139,92,246,0.12) 25%,rgba(139,92,246,0.25) 37%,rgba(139,92,246,0.12) 63%);background-size:200% 100%;animation:enc-shimmer 1.5s ease-in-out infinite;vertical-align:middle;}
+  .enc-shimmer.wide{min-width:120px;}
+
+  /* ── Glassmorphism card variant ── */
+  .sl-card-glass{background:rgba(12,16,32,0.55);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid rgba(139,92,246,0.18);border-radius:18px;padding:24px 28px;margin-bottom:16px;position:relative;overflow:hidden;transition:border-color 0.3s,box-shadow 0.3s;}
+  .sl-card-glass:hover{border-color:rgba(139,92,246,0.35);box-shadow:0 0 40px rgba(139,92,246,0.15),0 0 80px rgba(139,92,246,0.05);}
+  .sl-card-glass::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(139,92,246,0.45),rgba(52,211,153,0.2),transparent);}
+
+  /* ── Decrypt reveal animation ── */
+  @keyframes decrypt-reveal{from{opacity:0;filter:blur(8px);transform:translateY(6px)}to{opacity:1;filter:blur(0);transform:translateY(0)}}
+  .decrypt-reveal{animation:decrypt-reveal 0.4s ease-out forwards;opacity:0;}
+
+  /* ── FHE computation pipeline bar ── */
+  .sl-pipeline{display:flex;align-items:center;gap:12px;padding:14px 18px;background:rgba(139,92,246,0.04);border:1px solid rgba(139,92,246,0.12);border-radius:12px;margin-bottom:16px;font-size:11px;color:var(--muted);}
+  .sl-pipeline-step{display:flex;align-items:center;gap:6px;transition:color 0.3s,opacity 0.3s;}
+  .sl-pipeline-step.active{color:var(--accent);}
+  .sl-pipeline-step.done{color:var(--enc);}
+  .sl-pipeline-arrow{color:rgba(139,92,246,0.3);font-size:10px;}
+  .sl-pipeline-bar{flex:1;height:3px;background:rgba(139,92,246,0.1);border-radius:99px;overflow:hidden;}
+  .sl-pipeline-fill{height:100%;background:linear-gradient(90deg,var(--purple),var(--enc));border-radius:99px;transition:width 0.6s ease-out;}
+
   /* ── Buttons ── */
   .sl-btn{background:linear-gradient(135deg,var(--purple),#6d28d9);border:none;color:#fff;border-radius:10px;padding:11px 22px;font-weight:700;cursor:pointer;font-size:12px;font-family:'Space Mono',monospace;letter-spacing:0.05em;transition:transform 0.15s,box-shadow 0.15s;box-shadow:0 0 20px rgba(139,92,246,0.25);}
   .sl-btn:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 0 28px rgba(139,92,246,0.45);}

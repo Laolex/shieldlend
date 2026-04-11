@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { motion } from "framer-motion";
 import { TOKENS, type TokenSymbol } from "../config";
 
 interface DepositModalProps {
@@ -120,14 +121,47 @@ interface ResultModalProps {
 }
 
 export function ResultModal({ resultMsg, onClose }: ResultModalProps) {
+  const lines = resultMsg.split("\n").filter(Boolean);
+
   return (
-    <div className="sl-overlay" onClick={onClose}>
-      <div className="sl-modal" onClick={e => e.stopPropagation()}>
+    <motion.div
+      className="sl-overlay"
+      onClick={onClose}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.15 }}
+    >
+      <motion.div
+        className="sl-modal"
+        onClick={e => e.stopPropagation()}
+        initial={{ opacity: 0, y: 24, scale: 0.96 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ duration: 0.3, ease: "easeOut" }}
+      >
         <div className="sl-modal-title">&#x1F513; Decrypted Position</div>
         <div className="sl-modal-sub">Re-encrypted via Zama KMS &mdash; decrypted locally with your wallet keypair.</div>
-        <pre className="sl-result-pre">{resultMsg}</pre>
-        <button className="sl-btn" style={{ marginTop: 20, width: "100%" }} onClick={onClose}>Close</button>
-      </div>
-    </div>
+        <div className="sl-result-pre">
+          {lines.map((line, i) => (
+            <motion.div
+              key={i}
+              initial={{ opacity: 0, filter: "blur(8px)", y: 6 }}
+              animate={{ opacity: 1, filter: "blur(0px)", y: 0 }}
+              transition={{ duration: 0.4, delay: 0.15 + i * 0.08, ease: "easeOut" }}
+            >
+              {line}
+            </motion.div>
+          ))}
+        </div>
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.15 + lines.length * 0.08 + 0.2 }}
+          style={{ fontSize: 11, color: "var(--enc)", marginTop: 12, display: "flex", alignItems: "center", gap: 6 }}
+        >
+          &#x2713; Verified private computation via FHE
+        </motion.div>
+        <button className="sl-btn" style={{ marginTop: 16, width: "100%" }} onClick={onClose}>Close</button>
+      </motion.div>
+    </motion.div>
   );
 }
