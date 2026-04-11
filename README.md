@@ -8,9 +8,9 @@
 [![Network](https://img.shields.io/badge/Network-Sepolia-orange)]()
 
 **Lending Contract:**
-[`0x9013ba38D0b3d4e1587cEFEDebA185f5caee632E`](https://sepolia.etherscan.io/address/0x9013ba38D0b3d4e1587cEFEDebA185f5caee632E)  
+[`0x8b28B283Fc19A747B2fB69BA4428541a4b8bEafB`](https://sepolia.etherscan.io/address/0x8b28B283Fc19A747B2fB69BA4428541a4b8bEafB)  
 **ShieldScore Contract:**
-[`0x45D446946FF7186295f7f0413fb5cBfba6ED51C5`](https://sepolia.etherscan.io/address/0x45D446946FF7186295f7f0413fb5cBfba6ED51C5)  
+[`0x4d51e934d16f72b7fed83E3BB46cc813A0E5EAE5`](https://sepolia.etherscan.io/address/0x4d51e934d16f72b7fed83E3BB46cc813A0E5EAE5)  
 **Frontend:**
 [frontend-sigma-seven-16.vercel.app](https://frontend-sigma-seven-16.vercel.app)
 
