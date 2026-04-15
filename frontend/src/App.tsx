@@ -415,6 +415,7 @@ export default function ShieldLendApp() {
       <ComputationOverlay />
       <Header
         account={account} role={role} isAdmin={isAdmin} fhevmInst={fhevmInst}
+        loading={loading}
         walletMenu={walletMenu} setWalletMenu={setWalletMenu}
         onConnect={connect} onDisconnect={disconnect}
       />

@@ -164,10 +164,17 @@ describe("ConfidentialLending — Adversarial", function () {
     const getDebt = async () => decU64(await c.getEncryptedTotalDebt(user.address), addr, user);
 
     const d0 = await getDebt(); // 5000
+    // [M-1 fix] each accrual requires 1-day cooldown — advance time between calls
+    await ethers.provider.send("evm_increaseTime", [86401]);
+    await ethers.provider.send("evm_mine", []);
     await (await c.accrueInterest(user.address)).wait();
     const d1 = await getDebt();
+    await ethers.provider.send("evm_increaseTime", [86401]);
+    await ethers.provider.send("evm_mine", []);
     await (await c.accrueInterest(user.address)).wait();
     const d2 = await getDebt();
+    await ethers.provider.send("evm_increaseTime", [86401]);
+    await ethers.provider.send("evm_mine", []);
     await (await c.accrueInterest(user.address)).wait();
     const d3 = await getDebt();
 
@@ -291,7 +298,9 @@ describe("ConfidentialLending — Adversarial", function () {
     // No reveal performed — confirmedLiquidatable is false
     expect(await c.isConfirmedLiquidatable(user.address)).to.be.false;
 
-    // Admin emergency-liquidates
+    // Admin emergency-liquidates — must set treasury first (M-2 fix)
+    const [,, treasury] = await ethers.getSigners();
+    await (await c.setLiquidationTreasury(treasury.address)).wait();
     await (await c.emergencyLiquidate(user.address)).wait();
 
     expect(await c.isActive(user.address)).to.be.false;

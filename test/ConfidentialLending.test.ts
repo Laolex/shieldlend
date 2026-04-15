@@ -110,6 +110,9 @@ describe("ConfidentialLending", function () {
   describe("Interest accrual", function () {
     it("admin can accrue interest", async function () {
       const before = await decryptU64(await contract.getEncryptedTotalDebt(borrower1.address), borrower1);
+      // [M-1 fix] advance 1 day so cooldown guard passes
+      await ethers.provider.send("evm_increaseTime", [86401]);
+      await ethers.provider.send("evm_mine", []);
       await (await contract.accrueInterest(borrower1.address)).wait();
       const after  = await decryptU64(await contract.getEncryptedTotalDebt(borrower1.address), borrower1);
       // 5000 * 500 / 10000 = 250
@@ -427,6 +430,9 @@ describe("ConfidentialLending", function () {
       await (await c.connect(fresh2).borrow(
         ethers.hexlify(br.externalEuint as any), ethers.hexlify(br.inputProof as any)
       )).wait();
+      // [M-1 fix] advance 1 day so cooldown guard passes
+      await ethers.provider.send("evm_increaseTime", [86401]);
+      await ethers.provider.send("evm_mine", []);
       await (await c.accrueInterest(fresh2.address)).wait();
 
       const debt = await fhevm.userDecryptEuint(FhevmType.euint64, await c.getEncryptedTotalDebt(fresh2.address), addr, fresh2);

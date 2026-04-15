@@ -134,6 +134,10 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
     /// @notice Bonus paid to liquidator from protocolReserve. Default: 500 (5%).
     uint256 public liquidatorBonusBps = 500;
 
+    /// @notice Recipient of all emergency liquidation proceeds. Must be set before emergencyLiquidate can be called.
+    /// @dev [M-2] Decouples admin execution from custody — set to a multisig/treasury, never to msg.sender.
+    address payable public liquidationTreasury;
+
     uint256 public totalReserves;
 
     // ─── Events ────────────────────────────────────────────────────────────
@@ -164,7 +168,8 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
     event RateParamsUpdated(uint64 baseRate, uint64 utilization, uint64 multiplier);
     event CapsUpdated(uint256 ethSupplyCap_, uint256 maxBorrowPerPosition_);
     event ReserveWithdrawn(address indexed to, uint256 amount);
-    event EmergencyLiquidation(address indexed borrower, address indexed admin, uint256 timestamp);
+    event EmergencyLiquidation(address indexed borrower, address indexed admin, address indexed treasury, uint256 timestamp);
+    event LiquidationTreasurySet(address indexed treasury);
 
     constructor() {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
@@ -200,6 +205,11 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
      *         If oracle is set, the authoritative price is fetched here and emitted in
      *         TokenPriceUsed — clients should use this price before encrypting.
      *         If oracle is not set, TokenConfig.ethWeiPerToken is the fallback.
+     *
+     * @dev [CR-1] KNOWN LIMITATION: The contract cannot validate that inputHandle encodes
+     *      tokenAmount * price. A malicious user may encrypt a higher ETH-equivalent than
+     *      their actual deposit is worth. Mitigate in production with a ZK-range proof,
+     *      oracle-commit-reveal pattern, or trusted-relayer encrypted validation.
      */
     function depositToken(
         address token,
@@ -254,6 +264,7 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
         );
 
         euint64 encBorrow = FHE.fromExternal(externalEuint64.wrap(inputHandle), inputProof);
+        FHE.allowThis(encBorrow); // [H-1] ACL grant before coprocessor use
 
         euint64 newLoan = FHE.add(pos.loanAmount, encBorrow);
         euint64 newDebt = FHE.add(pos.totalDebt,  encBorrow);
@@ -286,6 +297,7 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
         require(pos.active, "No active position");
 
         euint64 encRepay = FHE.fromExternal(externalEuint64.wrap(inputHandle), inputProof);
+        FHE.allowThis(encRepay); // [H-1] ACL grant before coprocessor use
 
         // Floor-at-zero: if repayment > debt, clamp to 0 instead of wrapping
         euint64 newDebt  = FHE.select(FHE.not(FHE.lt(pos.totalDebt,  encRepay)), FHE.sub(pos.totalDebt,  encRepay), FHE.asEuint64(0));
@@ -302,6 +314,10 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
         FHE.allowThis(pos.loanAmount);
         FHE.allowThis(pos.isLiquidatable);
 
+        // [CR-2] Clear stale liquidation flag — a repaid position must not be liquidatable
+        delete confirmedLiquidatable[msg.sender];
+        delete pendingLiquidationReveal[msg.sender];
+
         emit Repaid(msg.sender, block.timestamp);
     }
 
@@ -314,8 +330,11 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
     function accrueInterest(address borrower) external onlyRole(ADMIN_ROLE) whenNotPaused {
         Position storage pos = positions[borrower];
         require(pos.active, "No active position");
+        // [M-1] Prevent unbounded compounding — enforce minimum 1-day interval
+        require(block.timestamp >= pos.lastAccrual + 1 days, "Accrue too soon");
 
         euint64 interest = FHE.div(FHE.mul(pos.totalDebt, pos.interestRate), 10000);
+        FHE.allowThis(interest); // [M-3] ACL grant for intermediate computed value
         euint64 newDebt  = FHE.add(pos.totalDebt, interest);
         pos.totalDebt    = newDebt;
         pos.lastAccrual  = block.timestamp;
@@ -334,6 +353,7 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
      */
     function requestLiquidationReveal(address borrower) external {
         require(positions[borrower].active, "No active position");
+        require(!pendingLiquidationReveal[borrower], "Reveal already pending"); // [H-3]
         ebool liqFlag = positions[borrower].isLiquidatable;
         FHE.makePubliclyDecryptable(liqFlag);
         pendingLiquidationReveal[borrower] = true;
@@ -380,11 +400,14 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
     /**
      * @notice Emergency liquidation — ADMIN_ROLE only.
      *         Skips the confirmedLiquidatable check for stuck positions or oracle-failure recovery.
+     * @dev [M-2] Proceeds go to liquidationTreasury, NOT msg.sender, preventing admin rug-pull.
+     *      Set liquidationTreasury to a multisig before using this function.
      */
     function emergencyLiquidate(address borrower) external onlyRole(ADMIN_ROLE) nonReentrant {
         require(positions[borrower].active, "No active position");
-        emit EmergencyLiquidation(borrower, msg.sender, block.timestamp);
-        _executeLiquidation(borrower, msg.sender);
+        require(liquidationTreasury != address(0), "liquidationTreasury not set");
+        emit EmergencyLiquidation(borrower, msg.sender, liquidationTreasury, block.timestamp);
+        _executeLiquidation(borrower, liquidationTreasury);
     }
 
     // ─────────────────────────── Close position ────────────────────────────
@@ -449,12 +472,15 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
         require(pos.active, "No active position");
 
         euint64 newScore     = FHE.fromExternal(externalEuint64.wrap(inputHandle), inputProof);
+        FHE.allowThis(newScore); // [H-1] ACL grant before coprocessor use
         pos.creditScore      = newScore;
 
         uint64 effectiveRate = _effectiveRate();
         euint64 discount     = FHE.div(FHE.shr(newScore, 1), 100);
+        FHE.allowThis(discount); // [H-1] ACL grant for intermediate
         euint64 maxDiscount  = FHE.asEuint64(effectiveRate / 2);
         euint64 safeDiscount = FHE.select(FHE.not(FHE.lt(maxDiscount, discount)), discount, maxDiscount);
+        FHE.allowThis(safeDiscount); // ACL grant for intermediate
         pos.interestRate     = FHE.sub(FHE.asEuint64(effectiveRate), safeDiscount);
 
         FHE.allow(pos.creditScore,  borrower);
@@ -500,9 +526,12 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
                         FHE.select(isStandard, FHE.asEuint64(130),
                             FHE.asEuint64(COLLATERAL_RATIO)));
         }
+        FHE.allowThis(ratio); // [H-2] ACL grant for computed ratio before FHE.mul use
 
         euint64 collateralScaled = FHE.mul(pos.collateral, FHE.asEuint64(100));
+        FHE.allowThis(collateralScaled);
         euint64 debtScaled       = FHE.mul(pos.totalDebt, ratio);
+        FHE.allowThis(debtScaled);
         ebool   isLiq            = FHE.lt(collateralScaled, debtScaled);
         FHE.allowThis(isLiq);
         return isLiq;
@@ -674,6 +703,14 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
         tokenSupplyCap[token] = cap;
     }
 
+    /// @notice Set the treasury address that receives emergency liquidation proceeds.
+    /// @dev [M-2] Must be set before emergencyLiquidate() can be called. Use a multisig.
+    function setLiquidationTreasury(address payable treasury) external onlyRole(ADMIN_ROLE) {
+        require(treasury != address(0), "Zero address");
+        liquidationTreasury = treasury;
+        emit LiquidationTreasurySet(treasury);
+    }
+
     /// @notice Update reserve factor and minimum reserve ratio.
     function setReserveParams(
         uint256 _reserveFactorBps,
@@ -715,6 +752,7 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
         uint64 _utilizationMultiplierBps
     ) external onlyRole(ADMIN_ROLE) {
         require(_utilizationBps <= 10000, "Utilization > 100%");
+        require(_baseRateBps <= 5000, "Base rate max 50%"); // [L-1] prevent euint64 overflow in FHE ops
         baseRateBps = _baseRateBps;
         utilizationBps = _utilizationBps;
         utilizationMultiplierBps = _utilizationMultiplierBps;
@@ -741,5 +779,9 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
         emit ScoreContractSet(addr);
     }
 
-    receive() external payable { totalReserves += msg.value; }
+    receive() external payable {
+        // [M-4] Enforce supply cap on direct ETH sends
+        require(ethSupplyCap == 0 || totalReserves + msg.value <= ethSupplyCap, "Supply cap reached");
+        totalReserves += msg.value;
+    }
 }

@@ -4,11 +4,11 @@
  * To use standalone: import ShieldScore from './ShieldScore', pass signer + fhevmInstance.
  */
 import { Contract } from "ethers";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import SCORE_ABI from "./shieldscore-abi.json";
 
 // ─── Config — update if deploying separately ─────────────────────────────────
-export const SCORE_CONTRACT_ADDRESS = import.meta.env.VITE_SCORE_CONTRACT_ADDRESS ?? "";
+export const SCORE_CONTRACT_ADDRESS = (import.meta.env.VITE_SCORE_CONTRACT_ADDRESS ?? "").trim();
 
 // ─── Tier thresholds (mirror contract constants) ─────────────────────────────
 export const TIER_PREMIUM  = 800;
@@ -35,8 +35,8 @@ const SCORE_STYLES = `
   .ss-title{font-size:10px;font-weight:700;letter-spacing:0.25em;color:var(--muted);text-transform:uppercase;margin-bottom:20px;display:flex;align-items:center;gap:10px;}
   .ss-title::after{content:'';flex:1;height:1px;background:var(--border);}
   .ss-score-display{display:flex;align-items:center;gap:20px;margin-bottom:24px;}
-  .ss-score-ring{width:80px;height:80px;border-radius:50%;border:3px solid var(--accent2);display:flex;align-items:center;justify-content:center;flex-direction:column;flex-shrink:0;}
-  .ss-score-num{font-family:'Syne',sans-serif;font-size:22px;font-weight:800;color:var(--accent2);}
+  .ss-score-ring{width:90px;height:90px;flex-shrink:0;position:relative;}
+  .ss-score-num{font-family:'Syne',sans-serif;font-size:20px;font-weight:800;}
   .ss-score-label{font-size:9px;color:var(--muted);letter-spacing:0.15em;}
   .ss-tiers{display:flex;flex-direction:column;gap:8px;flex:1;}
   .ss-tier{display:flex;align-items:center;justify-content:space-between;font-size:12px;padding:8px 12px;border-radius:8px;border:1px solid var(--border);}
@@ -57,6 +57,59 @@ const SCORE_STYLES = `
   .ss-row:last-of-type{border-bottom:none;}
   .ss-muted{color:var(--muted);}
 `;
+
+// ─── SVG arc score gauge ───────────────────────────────────────────────────
+function ScoreArc({ score }: { score: bigint | null }) {
+  const R = 36, CX = 45, CY = 45;
+  const circumference = 2 * Math.PI * R;
+  const pct = score !== null ? Math.min(Number(score) / 1000, 1) : 0;
+  const dashOffset = circumference * (1 - pct);
+
+  const color = score === null
+    ? "rgba(139,92,246,0.2)"
+    : Number(score) >= 800 ? "#34d399"
+    : Number(score) >= 600 ? "#fbbf24"
+    : "#f87171";
+
+  return (
+    <div className="ss-score-ring">
+      <svg width="90" height="90" viewBox="0 0 90 90" fill="none">
+        {/* Track */}
+        <circle cx={CX} cy={CY} r={R} stroke="rgba(139,92,246,0.12)" strokeWidth="5" fill="none" />
+        {/* Arc — rotated so it starts at top */}
+        <circle
+          cx={CX} cy={CY} r={R}
+          stroke={color}
+          strokeWidth="5"
+          fill="none"
+          strokeLinecap="round"
+          strokeDasharray={`${circumference}`}
+          strokeDashoffset={dashOffset}
+          transform={`rotate(-90 ${CX} ${CY})`}
+          style={{ transition: "stroke-dashoffset 0.8s ease-out, stroke 0.4s ease" }}
+        />
+        {/* Center text */}
+        {score !== null ? (
+          <>
+            <text x={CX} y={CY - 4} textAnchor="middle" dominantBaseline="middle"
+              fill={color} fontFamily="Syne, sans-serif" fontSize="18" fontWeight="800">
+              {Number(score)}
+            </text>
+            <text x={CX} y={CY + 14} textAnchor="middle" dominantBaseline="middle"
+              fill="#64748b" fontSize="8" letterSpacing="1.5">
+              / 1000
+            </text>
+          </>
+        ) : (
+          <text x={CX} y={CY} textAnchor="middle" dominantBaseline="middle"
+            fill="#64748b" fontSize="18">
+            🔒
+          </text>
+        )}
+      </svg>
+    </div>
+  );
+}
 
 export default function ShieldScore({ account, provider, fhevmInst, isOracle, onToast }: ShieldScoreProps) {
   const [scoreContract, setScoreContract] = useState<Contract | null>(null);
@@ -84,16 +137,15 @@ export default function ShieldScore({ account, provider, fhevmInst, isOracle, on
     return c;
   }, [scoreContract, provider, onToast]);
 
-  // ─── Inject styles once ────────────────────────────────────────────────────
-  const injectStyles = () => {
+  // ─── Inject styles once (on mount only) ───────────────────────────────────
+  useEffect(() => {
     const id = "ss-styles";
     if (!document.getElementById(id)) {
       const el = document.createElement("style");
       el.id = id; el.textContent = SCORE_STYLES;
       document.head.appendChild(el);
     }
-  };
-  injectStyles();
+  }, []);
 
   // ─── Load score + tiers via re-encryption ──────────────────────────────────
   const loadScore = async () => {
@@ -107,17 +159,24 @@ export default function ShieldScore({ account, provider, fhevmInst, isOracle, on
 
       if (exists) {
         if (fhevmInst) {
-          // Re-encrypt own score
+          // SDK v0.4.1: userDecrypt with HandleContractPair pattern
           const handle = await c.getEncryptedScore(account);
           const { publicKey, privateKey } = fhevmInst.generateKeypair();
-          const eip712  = fhevmInst.createEIP712(publicKey, SCORE_CONTRACT_ADDRESS);
-          const signer  = await provider.getSigner();
-          const sig     = await signer.signTypedData(
-            eip712.domain, { Reencrypt: eip712.types.Reencrypt }, eip712.message
+          const now = Math.floor(Date.now() / 1000);
+          const eip712 = fhevmInst.createEIP712(publicKey, [SCORE_CONTRACT_ADDRESS], now, 1);
+          const signer = await provider.getSigner();
+          const typeName = eip712.types.Reencrypt
+            ? "Reencrypt"
+            : Object.keys(eip712.types).find((k: string) => k !== "EIP712Domain")!;
+          const sig = await signer.signTypedData(
+            eip712.domain, { [typeName]: eip712.types[typeName] }, eip712.message
           );
-          const score   = await fhevmInst.reencrypt(
-            handle, privateKey, publicKey, sig, SCORE_CONTRACT_ADDRESS, account
+          const results = await fhevmInst.userDecrypt(
+            [{ handle, contractAddress: SCORE_CONTRACT_ADDRESS }],
+            privateKey, publicKey, sig,
+            [SCORE_CONTRACT_ADDRESS], account, now, 1,
           );
+          const score = Object.values(results)[0] as bigint;
           setRevealedScore(score);
           setTierPremium(Number(score)  >= TIER_PREMIUM);
           setTierStandard(Number(score) >= TIER_STANDARD);
@@ -228,12 +287,7 @@ export default function ShieldScore({ account, provider, fhevmInst, isOracle, on
           </div>
 
           <div className="ss-score-display">
-            <div className="ss-score-ring">
-              {revealedScore !== null
-                ? <><div className="ss-score-num">{Number(revealedScore)}</div><div className="ss-score-label">/ 1000</div></>
-                : <div className="ss-score-label" style={{ textAlign:"center" }}>🔒<br/>encrypted</div>
-              }
-            </div>
+            <ScoreArc score={revealedScore} />
             <div className="ss-tiers">
               {[
                 { label:"Premium",  threshold:TIER_PREMIUM,  benefit:"110% collateral ratio", met:tierPremium },

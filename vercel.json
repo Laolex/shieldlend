@@ -1,6 +1,6 @@
 {
-  "buildCommand": "npm install && npx tsc -b && npx vite build",
-  "outputDirectory": "dist",
+  "buildCommand": "cd frontend && npm install --engine-strict false && npx vite build",
+  "outputDirectory": "frontend/dist",
   "headers": [
     {
       "source": "/(.*)",

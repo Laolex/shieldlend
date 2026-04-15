@@ -205,6 +205,17 @@ export const STYLES = `
   .sl-wallet-menu-item.danger{color:var(--danger);}
   .sl-wallet-menu-item.danger:hover{background:rgba(248,113,113,0.08);}
   .sl-wallet-divider{height:1px;background:var(--border);margin:4px 0;}
+
+  /* ── Tx pending badge ── */
+  .sl-tx-pending{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--warn);background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);border-radius:20px;padding:4px 10px;animation:fadeIn 0.2s ease;}
+
+  /* ── Mobile header ── */
+  @media(max-width:480px){
+    .sl-fhe-status span{display:none;}
+    .sl-role-badge{display:none;}
+    .sl-network-badge{display:none;}
+    .sl-wallet-btn{padding:5px 10px;}
+  }
 `;
 
 export function injectStyles() {

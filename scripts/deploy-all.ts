@@ -73,6 +73,13 @@ async function main() {
   await tx.wait();
   console.log(`  ZAMA ${zamaAddr} — price: ${ZAMA_PRICE} wei/token (100 ZAMA/ETH)\n`);
 
+  // 7 — Set liquidation treasury (M-2 fix: emergencyLiquidate blocked until this is set)
+  //     Hackathon: deployer wallet. Production: replace with multisig address.
+  console.log("Setting liquidation treasury...");
+  tx = await lendingContract.setLiquidationTreasury(deployer.address);
+  await tx.wait();
+  console.log(`  Treasury: ${deployer.address} (⚠️  replace with multisig in production)\n`);
+
   console.log("=== Deployment Summary ===");
   console.log(`ConfidentialLending:     ${lendingAddr}`);
   console.log(`ConfidentialCreditScore: ${scoreAddr}`);

@@ -194,6 +194,12 @@
         "type": "address"
       },
       {
+        "indexed": true,
+        "internalType": "address",
+        "name": "treasury",
+        "type": "address"
+      },
+      {
         "indexed": false,
         "internalType": "uint256",
         "name": "timestamp",
@@ -313,6 +319,19 @@
       }
     ],
     "name": "LiquidationRevealRequested",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "treasury",
+        "type": "address"
+      }
+    ],
+    "name": "LiquidationTreasurySet",
     "type": "event"
   },
   {
@@ -1355,6 +1374,19 @@
   },
   {
     "inputs": [],
+    "name": "liquidationTreasury",
+    "outputs": [
+      {
+        "internalType": "address payable",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "liquidatorBonusBps",
     "outputs": [
       {
@@ -1559,6 +1591,19 @@
       }
     ],
     "name": "setCaps",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address payable",
+        "name": "treasury",
+        "type": "address"
+      }
+    ],
+    "name": "setLiquidationTreasury",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

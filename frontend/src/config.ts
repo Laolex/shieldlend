@@ -1,4 +1,4 @@
-export const CONTRACT_ADDRESS   = "0x8b28B283Fc19A747B2fB69BA4428541a4b8bEafB";
+export const CONTRACT_ADDRESS   = "0xF9d0f6910f054b4ba36d796475Ae581b7Caad60F";
 export const SCORE_CONTRACT_ADDRESS = (import.meta.env.VITE_SCORE_CONTRACT_ADDRESS ?? "").trim();
 export const NETWORK_NAME       = "Sepolia";
 export const CHAIN_ID           = 11155111;
@@ -28,7 +28,7 @@ export const TOKENS = [
   {
     symbol:   "ZAMA",
     name:     "Mock ZAMA",
-    address:  "0x0737E6c3dCBD76973730CC50031074AF50914308",
+    address:  "0x8a618d072fF0AA818bC92e2408C5305000477cA7",
     decimals: 18,
     // 1 ZAMA = 1/100 ETH = 10000000000000000 wei
     ethWeiPerToken: 10000000000000000n,

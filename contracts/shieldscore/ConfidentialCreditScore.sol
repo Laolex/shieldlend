@@ -55,7 +55,9 @@ contract ConfidentialCreditScore is ZamaEthereumConfig, AccessControlEnumerable,
     mapping(address => mapping(address => bool))  private hasVoted;    // subject => reviewer => voted
 
     // ─── Score reveal (public decryption) ───────────────────────────────────
-    mapping(address => bool) private pendingReveal;
+    // [H-5] Separate mappings to prevent state collision between dispute resolve and voluntary reveal
+    mapping(address => bool) private pendingScoreReveal;
+    mapping(address => bool) private pendingDisputeReveal;
 
     // ─── Config ─────────────────────────────────────────────────────────────
     uint256 public constant DISPUTE_DURATION = 3 days;
@@ -166,6 +168,7 @@ contract ConfidentialCreditScore is ZamaEthereumConfig, AccessControlEnumerable,
         require(!hasVoted[subject][msg.sender], "Already voted");
 
         euint8 encVote  = FHE.fromExternal(externalEuint8.wrap(voteHandle), inputProof);
+        FHE.allowThis(encVote); // [H-1] ACL grant before coprocessor use
         euint64 weight  = FHE.asEuint64(1);
         euint64 zero    = FHE.asEuint64(0);
         euint64 voteU64 = FHE.asEuint64(encVote);  // 0 or 1 → 64-bit
@@ -193,12 +196,12 @@ contract ConfidentialCreditScore is ZamaEthereumConfig, AccessControlEnumerable,
         Dispute storage d = disputes[subject];
         require(d.active && !d.resolved, "No active dispute");
         require(block.timestamp > d.deadline, "Voting still open");
-        require(!pendingReveal[subject], "Reveal already pending");
+        require(!pendingDisputeReveal[subject], "Reveal already pending");
 
         // Make both tallies publicly decryptable
         FHE.makePubliclyDecryptable(d.yesVotes);
         FHE.makePubliclyDecryptable(d.noVotes);
-        pendingReveal[subject] = true;
+        pendingDisputeReveal[subject] = true;
 
         emit ScoreRevealRequested(subject, FHE.toBytes32(d.yesVotes), block.timestamp);
     }
@@ -216,7 +219,7 @@ contract ConfidentialCreditScore is ZamaEthereumConfig, AccessControlEnumerable,
     ) external {
         Dispute storage d = disputes[subject];
         require(d.active && !d.resolved, "No active dispute");
-        require(pendingReveal[subject], "No pending reveal");
+        require(pendingDisputeReveal[subject], "No pending reveal");
 
         FHE.checkSignatures(handlesList, abiEncodedCleartexts, decryptionProof);
         (uint64 yesCount, uint64 noCount) = abi.decode(abiEncodedCleartexts, (uint64, uint64));
@@ -224,7 +227,7 @@ contract ConfidentialCreditScore is ZamaEthereumConfig, AccessControlEnumerable,
         bool approved = yesCount > noCount;
         d.resolved  = true;
         d.active    = false;
-        delete pendingReveal[subject];
+        delete pendingDisputeReveal[subject];
 
         if (approved) {
             // Reset to neutral default score as relief
@@ -247,10 +250,10 @@ contract ConfidentialCreditScore is ZamaEthereumConfig, AccessControlEnumerable,
     function requestScoreReveal(address subject) external {
         require(msg.sender == subject, "Only subject can reveal their score");
         require(scores[subject].active, "No score record");
-        require(!pendingReveal[subject], "Reveal already pending");
+        require(!pendingScoreReveal[subject], "Reveal already pending");
 
         FHE.makePubliclyDecryptable(scores[subject].score);
-        pendingReveal[subject] = true;
+        pendingScoreReveal[subject] = true;
         emit ScoreRevealRequested(subject, FHE.toBytes32(scores[subject].score), block.timestamp);
     }
 
@@ -263,10 +266,10 @@ contract ConfidentialCreditScore is ZamaEthereumConfig, AccessControlEnumerable,
         bytes calldata abiEncodedCleartexts,
         bytes calldata decryptionProof
     ) external {
-        require(pendingReveal[subject], "No pending reveal");
+        require(pendingScoreReveal[subject], "No pending reveal");
         FHE.checkSignatures(handlesList, abiEncodedCleartexts, decryptionProof);
         uint64 scoreValue = abi.decode(abiEncodedCleartexts, (uint64));
-        delete pendingReveal[subject];
+        delete pendingScoreReveal[subject];
         emit ScoreRevealed(subject, scoreValue, block.timestamp);
     }
 
@@ -281,7 +284,15 @@ contract ConfidentialCreditScore is ZamaEthereumConfig, AccessControlEnumerable,
     }
 
     function isPendingReveal(address subject) external view returns (bool) {
-        return pendingReveal[subject];
+        return pendingScoreReveal[subject] || pendingDisputeReveal[subject];
+    }
+
+    function isPendingScoreReveal(address subject) external view returns (bool) {
+        return pendingScoreReveal[subject];
+    }
+
+    function isPendingDisputeReveal(address subject) external view returns (bool) {
+        return pendingDisputeReveal[subject];
     }
 
     function scoreUpdatedAt(address subject) external view returns (uint256) {
