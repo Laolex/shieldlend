@@ -4,13 +4,14 @@
 
 [![Zama fhEVM](https://img.shields.io/badge/Built%20with-Zama%20fhEVM-blueviolet)](https://docs.zama.ai)
 [![Solidity](https://img.shields.io/badge/Solidity-0.8.27-blue)](https://soliditylang.org)
-[![Tests](https://img.shields.io/badge/Tests-57%2F57%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/Tests-73%2F73%20passing-brightgreen)]()
 [![Network](https://img.shields.io/badge/Network-Sepolia-orange)]()
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Vercel-black?logo=vercel)](https://frontend-sigma-seven-16.vercel.app)
 
 **Lending Contract:**
-[`0x8b28B283Fc19A747B2fB69BA4428541a4b8bEafB`](https://sepolia.etherscan.io/address/0x8b28B283Fc19A747B2fB69BA4428541a4b8bEafB)  
+[`0xF9d0f6910f054b4ba36d796475Ae581b7Caad60F`](https://sepolia.etherscan.io/address/0xF9d0f6910f054b4ba36d796475Ae581b7Caad60F)  
 **ShieldScore Contract:**
-[`0x4d51e934d16f72b7fed83E3BB46cc813A0E5EAE5`](https://sepolia.etherscan.io/address/0x4d51e934d16f72b7fed83E3BB46cc813A0E5EAE5)  
+[`0x084900bdf01193b158989518Bc6242B1C201273F`](https://sepolia.etherscan.io/address/0x084900bdf01193b158989518Bc6242B1C201273F)  
 **Frontend:**
 [frontend-sigma-seven-16.vercel.app](https://frontend-sigma-seven-16.vercel.app)
 
@@ -47,7 +48,38 @@ ShieldLend moves *all* lending arithmetic inside FHE ciphertexts. The protocol c
 
 ---
 
-## Architecture
+## ★ What Makes ShieldScore Novel
+
+Most FHE lending demos stop at encrypting balances. ShieldLend goes further with a **two-contract system where the credit score permanently shapes the protocol's behaviour — without the protocol ever seeing the score.**
+
+### The key insight: encrypted policy, not encrypted data
+
+Every existing credit scoring system in DeFi (Spectral, ARCx, Masa) computes a score **in the clear** and stores it publicly. The "privacy" is just UI — the raw data is on-chain.
+
+ShieldScore inverts this:
+
+```
+Traditional DeFi credit:         ShieldScore architecture:
+─────────────────────────         ────────────────────────
+score = public uint256            score = euint64 ciphertext
+protocol reads score              protocol NEVER reads score
+computes ratio in clear           FHE.select picks ratio blindly
+anyone can see your tier          only YOU can decrypt your score
+```
+
+The lending contract calls `FHE.select(meetsThreshold, tightRatio, looseRatio)` — it gets the right collateral ratio back **without learning which branch was taken.** This is a fundamentally different privacy model from anything deployed on Ethereum today.
+
+### Encrypted dispute voting
+
+When a borrower believes their score is wrong, they open a dispute. Reviewers cast `euint8` encrypted votes. The contract tallies them via `FHE.add` — the final count is publicly revealed, but **individual votes are never exposed.** This gives verifiable vote integrity with ballot secrecy, using only FHE primitives.
+
+### Composability: any protocol can plug in ShieldScore
+
+`ConfidentialCreditScore` is fully decoupled. Any fhEVM lending, insurance, or yield protocol can call `meetsThreshold()` or `getEncryptedScore()` and gate their own logic on a user's credit tier — without reading the score. It's a **private credit primitive for DeFi.**
+
+---
+
+
 
 ShieldLend is two composable contracts:
 
@@ -250,9 +282,9 @@ Future enhancements could use **zkTLS** or **TEE attestations** to prove the off
 ## Test Results
 
 ```
-57 passing  (0 failing)
+73 passing  (0 failing)
 
-ConfidentialLending (44 tests)
+ConfidentialLending (37 tests)
   Deployment, deposit, borrow, repay, interest accrual
   Credit score integration + rate discounts
   Pause/unpause, access control
@@ -260,14 +292,23 @@ ConfidentialLending (44 tests)
   Liquidation (request reveal → verify → execute)
   Borrower list O(1) removal
   ShieldScore tier-gated collateral ratios
+  Core FHE math: userDecryptEbool health factor, publicDecryptEbool liquidation reveal
 
-ConfidentialCreditScore / ShieldScore (13 tests)
+ConfidentialLending — Adversarial (16 tests)
+  Near-threshold: exactly 150% is NOT liquidatable; 1 wei below IS
+  Overflow-boundary: large values do not silent-wrap
+  Floor-at-zero: repay ≥ debt → totalDebt = 0, not underflow
+  Sequential accrual: debt grows monotonically
+  Borrow caps: one-wei-over reverts
+  Reserve gate: borrow reverts below minReserveRatio
+
+ConfidentialCreditScore / ShieldScore (20 tests)
   Oracle: setScore, update, access gating
-  Re-encryption: subject decrypts own score
-  Threshold: FHE comparison without revealing score
-  Dispute: open → vote → resolve
-  Dispute constraints: no double-vote, deadline enforcement
-  Public decryption: voluntary score reveal
+  userDecrypt: subject decrypts own encrypted score
+  meetsThreshold: FHE comparison without revealing score
+  Dispute: open → cast encrypted vote → resolve via public decryption
+  Dispute constraints: no double-vote, deadline enforcement, vote tally
+  Public decryption: voluntary score reveal flow
 ```
 
 ---
