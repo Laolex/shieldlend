@@ -206,10 +206,13 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
      *         TokenPriceUsed — clients should use this price before encrypting.
      *         If oracle is not set, TokenConfig.ethWeiPerToken is the fallback.
      *
-     * @dev [CR-1] KNOWN LIMITATION: The contract cannot validate that inputHandle encodes
-     *      tokenAmount * price. A malicious user may encrypt a higher ETH-equivalent than
-     *      their actual deposit is worth. Mitigate in production with a ZK-range proof,
-     *      oracle-commit-reveal pattern, or trusted-relayer encrypted validation.
+     * @dev [CR-1] The contract clamps the encrypted ETH-equivalent to an oracle-derived
+     *      plaintext ceiling (tokenAmount * price / 10**decimals) using FHE.select.
+     *      A malicious user who over-reports their ETH-equivalent is silently clamped
+     *      down to the authoritative value. The cap itself is plaintext and therefore
+     *      leaks the *maximum* deposit value — but that value is already public on-chain
+     *      via the ERC20 transfer amount, so no additional privacy is lost. A user who
+     *      under-reports will simply get credited less collateral than they deposited.
      */
     function depositToken(
         address token,
@@ -227,17 +230,43 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
             "Token supply cap reached"
         );
 
-        // Fetch and emit oracle price (reverts if stale)
+        // [CR-1] Resolve authoritative price (oracle if set, else fallback).
+        //        Used both for the TokenPriceUsed event AND to compute an upper-bound
+        //        clamp on the user-submitted encrypted ETH equivalent.
+        uint256 price;
         if (address(oracle) != address(0)) {
-            uint256 price = oracle.getEthWeiPerToken(token);
+            price = oracle.getEthWeiPerToken(token);
             emit TokenPriceUsed(token, price, block.timestamp);
+        } else {
+            require(cfg.ethWeiPerToken > 0, "No price available");
+            price = cfg.ethWeiPerToken;
         }
 
         IERC20(token).safeTransferFrom(msg.sender, address(this), tokenAmount);
         tokenDeposited[msg.sender][token] += tokenAmount;
 
+        // [CR-1] Compute plaintext ETH-wei cap = tokenAmount * price / 10**decimals.
+        //        The cap is still public (it leaks the deposit value, which is already
+        //        known from the ERC20 transfer), but it prevents the user from
+        //        encrypting an ETH-equivalent GREATER than what they actually deposited.
+        //        The FHE.select below takes the minimum of (cap, userEncryptedValue),
+        //        so a user who under-reports still gets what they declared, but one who
+        //        over-reports is clamped down to the oracle-derived ceiling.
+        uint256 capWei = (tokenAmount * price) / (10 ** uint256(cfg.decimals));
+        // Clamp cap to uint64 range to stay inside euint64 arithmetic safely.
+        if (capWei > type(uint64).max) {
+            capWei = type(uint64).max;
+        }
+
         euint64 encEquiv = FHE.fromExternal(externalEuint64.wrap(inputHandle), inputProof);
-        _applyCollateral(msg.sender, encEquiv);
+        FHE.allowThis(encEquiv);
+        euint64 encCap   = FHE.asEuint64(uint64(capWei));
+        FHE.allowThis(encCap);
+        // clamped = encEquiv > cap ? cap : encEquiv
+        euint64 clamped  = FHE.select(FHE.lt(encCap, encEquiv), encCap, encEquiv);
+        FHE.allowThis(clamped);
+
+        _applyCollateral(msg.sender, clamped);
 
         emit TokenDeposited(msg.sender, token, tokenAmount, block.timestamp);
     }
@@ -371,6 +400,16 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
         bytes calldata decryptionProof
     ) external {
         require(pendingLiquidationReveal[borrower], "No pending reveal");
+        // [C-01] Pin handle to this borrower's isLiquidatable ciphertext.
+        // checkSignatures attests that `handlesList` decrypts to `cleartexts` — it does
+        // NOT bind them to any particular storage slot. Without this check, anyone could
+        // submit any previously-publicly-decryptable ebool(true) and confirm liquidation
+        // on a solvent position.
+        require(handlesList.length == 1, "Expected 1 handle");
+        require(
+            handlesList[0] == FHE.toBytes32(positions[borrower].isLiquidatable),
+            "Handle mismatch"
+        );
         FHE.checkSignatures(handlesList, abiEncodedCleartexts, decryptionProof);
         bool isLiquidatable = abi.decode(abiEncodedCleartexts, (bool));
         delete pendingLiquidationReveal[borrower];
@@ -434,6 +473,14 @@ contract ConfidentialLending is ZamaEthereumConfig, AccessControlEnumerable, Ree
         bytes calldata decryptionProof
     ) external nonReentrant {
         require(pendingClose[msg.sender], "No pending close");
+        // [C-01] Pin handle to this borrower's totalDebt ciphertext. Without this,
+        // a borrower with nonzero debt could submit any publicly-decryptable euint64(0)
+        // handle and close their position without repaying — draining the protocol.
+        require(handlesList.length == 1, "Expected 1 handle");
+        require(
+            handlesList[0] == FHE.toBytes32(positions[msg.sender].totalDebt),
+            "Handle mismatch"
+        );
         FHE.checkSignatures(handlesList, abiEncodedCleartexts, decryptionProof);
         uint64 debtPlaintext = abi.decode(abiEncodedCleartexts, (uint64));
         require(debtPlaintext == 0, "Outstanding debt - repay in full before closing");

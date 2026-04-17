@@ -59,19 +59,32 @@ async function main() {
   console.log("Wiring ShieldScore...");
   let tx = await lendingContract.setScoreContract(scoreAddr);
   await tx.wait();
-  console.log("Done.\n");
+  // [H-01] Grant the lending contract READER_ROLE so it can call meetsThreshold
+  //        for health-factor gating. Without this grant, ConfidentialLending can
+  //        no longer read tier thresholds and every borrow/repay reverts.
+  tx = await scoreContract.grantReaderRole(lendingAddr);
+  await tx.wait();
+  console.log("Done (wired + granted READER_ROLE).\n");
+
+  // Helper: idempotent addToken — no-op if already registered.
+  async function addTokenIfMissing(token: string, decimals: number, price: bigint, label: string) {
+    const cfg = await lendingContract.tokenConfigs(token);
+    if (cfg.supported) {
+      console.log(`  ${label} already registered — skipping.`);
+      return;
+    }
+    const addTx = await lendingContract.addToken(token, decimals, price);
+    await addTx.wait();
+    console.log(`  ${label} ${token} — price: ${price} wei/token\n`);
+  }
 
   // 5 — Register USDC
   console.log("Adding USDC as collateral token...");
-  tx = await lendingContract.addToken(USDC_SEPOLIA, 6, USDC_PRICE);
-  await tx.wait();
-  console.log(`  USDC ${USDC_SEPOLIA} — price: ${USDC_PRICE} wei/token (3000 USDC/ETH)\n`);
+  await addTokenIfMissing(USDC_SEPOLIA, 6, USDC_PRICE, "USDC");
 
   // 6 — Register MockZAMA
   console.log("Adding MockZAMA as collateral token...");
-  tx = await lendingContract.addToken(zamaAddr, 18, ZAMA_PRICE);
-  await tx.wait();
-  console.log(`  ZAMA ${zamaAddr} — price: ${ZAMA_PRICE} wei/token (100 ZAMA/ETH)\n`);
+  await addTokenIfMissing(zamaAddr, 18, ZAMA_PRICE, "ZAMA");
 
   // 7 — Set liquidation treasury (M-2 fix: emergencyLiquidate blocked until this is set)
   //     Hackathon: deployer wallet. Production: replace with multisig address.

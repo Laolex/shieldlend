@@ -33,6 +33,10 @@ contract ConfidentialCreditScore is ZamaEthereumConfig, AccessControlEnumerable,
 
     bytes32 public constant ORACLE_ROLE   = keccak256("ORACLE_ROLE");
     bytes32 public constant REVIEWER_ROLE = keccak256("REVIEWER_ROLE");
+    // [H-01] Gates meetsThreshold — granted to integrating protocols (e.g. ShieldLend).
+    // Without this, any caller could binary-search a subject's score by sweeping
+    // thresholds (500, 600, 700, ...) and decrypting each ebool.
+    bytes32 public constant READER_ROLE   = keccak256("READER_ROLE");
 
     // ─── Score storage ──────────────────────────────────────────────────────
     struct ScoreRecord {
@@ -113,6 +117,13 @@ contract ConfidentialCreditScore is ZamaEthereumConfig, AccessControlEnumerable,
      */
     function meetsThreshold(address subject, uint64 threshold) external override returns (ebool) {
         require(scores[subject].active, "No score record");
+        // [H-01] Only the subject themselves or authorised readers (e.g. the lending
+        // contract granted READER_ROLE) may probe thresholds — otherwise anyone can
+        // binary-search the encrypted score one ebool at a time.
+        require(
+            msg.sender == subject || hasRole(READER_ROLE, msg.sender),
+            "Not authorised reader"
+        );
         // not(lt(score, threshold)) = score >= threshold
         ebool result = FHE.not(FHE.lt(scores[subject].score, FHE.asEuint64(threshold)));
         // Grant caller (e.g. ShieldLend contract, or subject in tests) access
@@ -221,6 +232,10 @@ contract ConfidentialCreditScore is ZamaEthereumConfig, AccessControlEnumerable,
         require(d.active && !d.resolved, "No active dispute");
         require(pendingDisputeReveal[subject], "No pending reveal");
 
+        // [C-01] Pin handles to the yesVotes/noVotes tallies for this dispute.
+        require(handlesList.length == 2, "Expected 2 handles");
+        require(handlesList[0] == FHE.toBytes32(d.yesVotes), "yesVotes handle mismatch");
+        require(handlesList[1] == FHE.toBytes32(d.noVotes),  "noVotes handle mismatch");
         FHE.checkSignatures(handlesList, abiEncodedCleartexts, decryptionProof);
         (uint64 yesCount, uint64 noCount) = abi.decode(abiEncodedCleartexts, (uint64, uint64));
 
@@ -267,6 +282,12 @@ contract ConfidentialCreditScore is ZamaEthereumConfig, AccessControlEnumerable,
         bytes calldata decryptionProof
     ) external {
         require(pendingScoreReveal[subject], "No pending reveal");
+        // [C-01] Pin handle to this subject's current score ciphertext.
+        require(handlesList.length == 1, "Expected 1 handle");
+        require(
+            handlesList[0] == FHE.toBytes32(scores[subject].score),
+            "Handle mismatch"
+        );
         FHE.checkSignatures(handlesList, abiEncodedCleartexts, decryptionProof);
         uint64 scoreValue = abi.decode(abiEncodedCleartexts, (uint64));
         delete pendingScoreReveal[subject];
@@ -303,4 +324,5 @@ contract ConfidentialCreditScore is ZamaEthereumConfig, AccessControlEnumerable,
 
     function grantOracleRole(address a)   external onlyRole(DEFAULT_ADMIN_ROLE) { grantRole(ORACLE_ROLE, a); }
     function grantReviewerRole(address a) external onlyRole(DEFAULT_ADMIN_ROLE) { grantRole(REVIEWER_ROLE, a); }
+    function grantReaderRole(address a)   external onlyRole(DEFAULT_ADMIN_ROLE) { grantRole(READER_ROLE, a); }
 }

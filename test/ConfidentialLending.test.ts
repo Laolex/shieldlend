@@ -526,6 +526,8 @@ describe("ConfidentialLending", function () {
       await lendC.waitForDeployment();
       lendAddr = await lendC.getAddress();
       await lendC.setScoreContract(await scoreC.getAddress());
+      // [H-01] Lending contract must hold READER_ROLE on ShieldScore to call meetsThreshold
+      await scoreC.grantReaderRole(lendAddr);
     });
 
     async function encryptL(signer: HardhatEthersSigner, val: bigint) {

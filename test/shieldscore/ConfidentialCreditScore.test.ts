@@ -122,6 +122,23 @@ describe("ConfidentialCreditScore (ShieldScore)", function () {
       await expect(contract.meetsThreshold(subject2.address, 600))
         .to.be.revertedWith("No score record");
     });
+
+    // [H-01] An unauthorised caller must not be able to probe thresholds against
+    //        another subject. Without this gate, an attacker could binary-search
+    //        the encrypted score by sweeping thresholds and decrypting each ebool.
+    it("H-01: non-subject, non-reader cannot call meetsThreshold on someone else", async function () {
+      // subject1 has score 820; reviewer1 is not subject1 and has no READER_ROLE.
+      await expect(
+        contract.connect(reviewer1).meetsThreshold(subject1.address, 600)
+      ).to.be.revertedWith("Not authorised reader");
+    });
+
+    it("H-01: admin can grant READER_ROLE, then the reader can probe", async function () {
+      // Grant reviewer2 READER_ROLE; it should now pass the role check.
+      await (await contract.grantReaderRole(reviewer2.address)).wait();
+      const tx = await contract.connect(reviewer2).meetsThreshold(subject1.address, 600);
+      await tx.wait(); // no revert
+    });
   });
 
   // ── Dispute system ────────────────────────────────────────────────────────

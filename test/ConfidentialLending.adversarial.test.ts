@@ -401,4 +401,118 @@ describe("ConfidentialLending — Adversarial", function () {
     const rate = await decU64(rateHandle, addr, user);
     expect(rate).to.equal(1000n);
   });
+
+  // ── Test 16: C-01 handle-pinning — close path ────────────────────────────
+  // A borrower with nonzero debt tries to substitute another user's zero-debt
+  // totalDebt ciphertext (with a valid KMS signature) into their verifyAndClose.
+  // Before the fix, this would close the position without repaying.
+  it("16. C-01 handle-pinning: verifyAndClose rejects a foreign totalDebt handle", async function () {
+    const [c, addr, signers] = await deployFresh();
+    const attacker = signers[1];
+    const victim   = signers[2]; // legitimately debt-free user
+
+    // Victim opens + requests close → their totalDebt(0) handle becomes publicly decryptable.
+    await deposit(c, addr, victim, 5000n);
+    await (await c.connect(victim).requestClosePosition()).wait();
+    const victimHandle   = await c.getEncryptedTotalDebt(victim.address);
+    const victimHandleHx = ethers.hexlify(victimHandle as any);
+    const victimSig      = await fhevm.publicDecrypt([victimHandleHx]);
+
+    // Attacker opens a position AND borrows (nonzero debt), then requests close.
+    await deposit(c, addr, attacker, 10000n);
+    await borrow(c, addr, attacker, 3000n);
+    await (await c.connect(attacker).requestClosePosition()).wait();
+
+    // Attacker submits the VICTIM'S handle + sig to their own verifyAndClose.
+    // The sig is valid (victim's debt really is 0) but the handle does not match
+    // the attacker's own totalDebt slot. Must revert with "Handle mismatch".
+    await expect(
+      c.connect(attacker).verifyAndClose(
+        [victimHandleHx],
+        victimSig.abiEncodedClearValues,
+        victimSig.decryptionProof
+      )
+    ).to.be.revertedWith("Handle mismatch");
+
+    // Attacker's position must remain active with debt untouched.
+    expect(await c.isActive(attacker.address)).to.be.true;
+    const debt = await decU64(await c.getEncryptedTotalDebt(attacker.address), addr, attacker);
+    expect(debt).to.equal(3000n);
+  });
+
+  // ── Test 17: C-01 handle-pinning — liquidation path ──────────────────────
+  // An attacker tries to flip confirmedLiquidatable on a HEALTHY borrower by
+  // submitting a different underwater borrower's ebool(true) handle + sig.
+  it("17. C-01 handle-pinning: verifyLiquidationReveal rejects a foreign ebool handle", async function () {
+    const [c, addr, signers] = await deployFresh();
+    const [admin] = signers;
+    const safe     = signers[3]; // healthy borrower
+    const unsafe   = signers[4]; // underwater borrower
+
+    // Healthy: collateral 150 / debt 50 → safe at 150% ratio
+    await deposit(c, addr, safe, 150n);
+    await borrow(c, addr, safe, 50n);
+    // Underwater: collateral 100 / debt 80 → liquidatable (10000 < 80*150=12000)
+    await deposit(c, addr, unsafe, 100n);
+    await borrow(c, addr, unsafe, 80n);
+
+    // Kick reveal on the underwater borrower — their ebool(true) becomes publicly
+    // decryptable with a valid KMS sig.
+    await (await c.requestLiquidationReveal(unsafe.address)).wait();
+    const unsafeHandle   = await c.getIsLiquidatable(unsafe.address);
+    const unsafeHandleHx = ethers.hexlify(unsafeHandle as any);
+    const unsafeSig      = await fhevm.publicDecrypt([unsafeHandleHx]);
+
+    // Kick reveal on the safe borrower too — so pendingLiquidationReveal[safe]=true.
+    await (await c.requestLiquidationReveal(safe.address)).wait();
+
+    // Attacker submits UNSAFE borrower's (true) handle + sig against SAFE borrower.
+    // Before the fix this would set confirmedLiquidatable[safe] = true.
+    await expect(
+      c.verifyLiquidationReveal(
+        safe.address,
+        [unsafeHandleHx],
+        unsafeSig.abiEncodedClearValues,
+        unsafeSig.decryptionProof
+      )
+    ).to.be.revertedWith("Handle mismatch");
+
+    expect(await c.isConfirmedLiquidatable(safe.address)).to.be.false;
+  });
+
+  // ── Test 18: C-02 depositToken clamp ─────────────────────────────────────
+  // A malicious user encrypts an ETH-equivalent greater than their deposit's
+  // true value. The on-chain FHE.select must clamp it to the oracle-derived
+  // plaintext cap, preventing artificially inflated collateral.
+  it("18. C-02 clamp: over-reported depositToken ETH-equivalent is capped", async function () {
+    const [c, addr, signers] = await deployFresh();
+    const attacker = signers[1];
+
+    // Deploy MockZAMA (18 decimals) and register it at 1 ZAMA = 0.01 ETH.
+    const zamaFactory = await ethers.getContractFactory("MockZAMA");
+    const zama = await zamaFactory.deploy();
+    await zama.waitForDeployment();
+    const zamaAddr = await zama.getAddress();
+
+    const PRICE = (10n ** 18n) / 100n; // 0.01 ETH per ZAMA
+    await c.addToken(zamaAddr, 18, PRICE);
+
+    // Fund attacker with 1 ZAMA and approve the lending contract.
+    await (await zama.mint(attacker.address, 10n ** 18n)).wait();
+    await (await zama.connect(attacker).approve(addr, 10n ** 18n)).wait();
+
+    // True value of 1 ZAMA at the registered price = 0.01 ETH = 10^16 wei.
+    const TRUE_WEI      = 10n ** 16n;
+    // Attacker attempts to credit themselves 1 ETH (10^18 wei) of collateral.
+    const OVER_REPORTED = 10n ** 18n;
+
+    const enc = await encU64(attacker, OVER_REPORTED, addr);
+    await (await c.connect(attacker).depositToken(
+      zamaAddr, 10n ** 18n, enc.externalEuint, enc.inputProof
+    )).wait();
+
+    // Decrypt the stored collateral — must equal the cap (TRUE_WEI), NOT the over-reported value.
+    const collateral = await decU64(await c.getEncryptedCollateral(attacker.address), addr, attacker);
+    expect(collateral).to.equal(TRUE_WEI);
+  });
 });

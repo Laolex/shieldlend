@@ -4,14 +4,14 @@
 
 [![Zama fhEVM](https://img.shields.io/badge/Built%20with-Zama%20fhEVM-blueviolet)](https://docs.zama.ai)
 [![Solidity](https://img.shields.io/badge/Solidity-0.8.27-blue)](https://soliditylang.org)
-[![Tests](https://img.shields.io/badge/Tests-73%2F73%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/Tests-78%2F78%20passing-brightgreen)]()
 [![Network](https://img.shields.io/badge/Network-Sepolia-orange)]()
 [![Live Demo](https://img.shields.io/badge/Live%20Demo-Vercel-black?logo=vercel)](https://frontend-sigma-seven-16.vercel.app)
 
 **Lending Contract:**
-[`0xF9d0f6910f054b4ba36d796475Ae581b7Caad60F`](https://sepolia.etherscan.io/address/0xF9d0f6910f054b4ba36d796475Ae581b7Caad60F)  
+[`0x5b485FF37E2c9C2481A8acCDF3C7F0B365b13796`](https://sepolia.etherscan.io/address/0x5b485FF37E2c9C2481A8acCDF3C7F0B365b13796)  
 **ShieldScore Contract:**
-[`0x084900bdf01193b158989518Bc6242B1C201273F`](https://sepolia.etherscan.io/address/0x084900bdf01193b158989518Bc6242B1C201273F)  
+[`0xAFFb4D2881C801Eb3604FCcbEe84CA2ce9029770`](https://sepolia.etherscan.io/address/0xAFFb4D2881C801Eb3604FCcbEe84CA2ce9029770)  
 **Frontend:**
 [frontend-sigma-seven-16.vercel.app](https://frontend-sigma-seven-16.vercel.app)
 
@@ -109,7 +109,8 @@ euint64 interest = FHE.div(FHE.mul(pos.totalDebt, pos.interestRate), 10000);
 pos.totalDebt    = FHE.add(pos.totalDebt, interest);
 
 // Credit score → interest rate discount: all encrypted
-euint64 discount = FHE.div(FHE.div(newScore, 2), 100);
+// shr(_,1) is div-by-2 but gas-cheaper under FHE than FHE.div(_, 2)
+euint64 discount = FHE.div(FHE.shr(newScore, 1), 100);
 pos.interestRate = FHE.sub(FHE.asEuint64(BASE_RATE_BPS), discount);
 ```
 
@@ -282,7 +283,7 @@ Future enhancements could use **zkTLS** or **TEE attestations** to prove the off
 ## Test Results
 
 ```
-73 passing  (0 failing)
+78 passing  (0 failing)
 
 ConfidentialLending (37 tests)
   Deployment, deposit, borrow, repay, interest accrual
@@ -294,22 +295,56 @@ ConfidentialLending (37 tests)
   ShieldScore tier-gated collateral ratios
   Core FHE math: userDecryptEbool health factor, publicDecryptEbool liquidation reveal
 
-ConfidentialLending — Adversarial (16 tests)
+ConfidentialLending — Adversarial (19 tests)
   Near-threshold: exactly 150% is NOT liquidatable; 1 wei below IS
   Overflow-boundary: large values do not silent-wrap
   Floor-at-zero: repay ≥ debt → totalDebt = 0, not underflow
   Sequential accrual: debt grows monotonically
   Borrow caps: one-wei-over reverts
   Reserve gate: borrow reverts below minReserveRatio
+  [C-01] Handle-substitution attack on verifyAndClose reverts
+  [C-01] Handle-substitution attack on verifyLiquidationReveal reverts
+  [C-02] Oracle-cap clamp: over-reported ETH-equivalent in depositToken truncates to true value
 
-ConfidentialCreditScore / ShieldScore (20 tests)
+ConfidentialCreditScore / ShieldScore (22 tests)
   Oracle: setScore, update, access gating
   userDecrypt: subject decrypts own encrypted score
   meetsThreshold: FHE comparison without revealing score
   Dispute: open → cast encrypted vote → resolve via public decryption
   Dispute constraints: no double-vote, deadline enforcement, vote tally
   Public decryption: voluntary score reveal flow
+  [H-01] Non-reader cannot probe meetsThreshold on someone else
+  [H-01] Admin-granted READER_ROLE can probe, subject can always probe self
 ```
+
+---
+
+## Known Limitations & Trust Assumptions
+
+Honest disclosure of design choices made for this hackathon submission. These are *acknowledged* risks, not hidden ones — production deployment would require addressing each.
+
+### Security audit (self-reported, 2026-04-17)
+
+Two Critical and one High finding were identified and **fixed in source** (covered by adversarial tests above):
+
+| ID   | Issue | Fix |
+|------|-------|-----|
+| C-01 | KMS decryption callbacks did not pin `handlesList[0]` to the expected ciphertext, letting any caller substitute a publicly-decryptable zero-handle to forge `debt == 0` or `isLiquidatable == true`. | Every `FHE.checkSignatures` call is now preceded by `require(handlesList[i] == FHE.toBytes32(expectedCiphertext))`. |
+| C-02 | `depositToken` trusted the user's encrypted ETH-equivalent without verifying it matched `tokenAmount × price`. | Contract now computes plaintext oracle-derived cap and clamps encrypted input via `FHE.select(lt(cap, encIn), cap, encIn)`. |
+| H-01 | `meetsThreshold` was callable by anyone against any subject — enabled binary-searching the encrypted score by sweeping thresholds. | Added `READER_ROLE`; only `msg.sender == subject` or `hasRole(READER_ROLE, msg.sender)` may call. Lending contract receives the role during deployment. |
+
+### Residual trust assumptions (accepted for hackathon)
+
+- **ORACLE_ROLE is a single point of trust.** A compromised or malicious oracle can set any encrypted score for any subject; subjects cannot cryptographically verify the source data. Production would require either (a) a multi-oracle quorum or (b) ZK-proven off-chain computation (e.g. Risc Zero, SP1) over source credit data.
+- **`scoreContract` is admin-upgradable via `setScoreContract(address)`.** An admin can redirect all tier checks to a malicious contract. Production would require timelocked upgrade + role-based multisig.
+- **`liquidationTreasury` is the deployer EOA on the current Sepolia deployment.** Seized collateral routes to a single hot wallet. Production would require a Gnosis Safe or equivalent multisig.
+- **Token oracle is an admin-set per-token price.** `tokenConfigs[token].ethWeiPerToken` is set via `addToken` and not automatically refreshed. A live system needs Chainlink or TWAP-based pricing — the clamp in C-02's fix is only as honest as this value.
+- **Interest accrual uses a fixed APR, no utilization curve.** Realistic lending protocols vary rate by pool utilization (Aave/Compound model). Out of scope for this submission.
+
+### Known minor issues
+
+- Deploy script's `liquidationTreasury` defaults to `deployer.address` — document / swap before any mainnet rehearsal.
+- No circuit breaker on total protocol TVL — production should bound exposure per-token and globally.
 
 ---
 
