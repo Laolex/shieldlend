@@ -16,6 +16,7 @@ interface BorrowerCardProps {
   setModal: (m: ModalType) => void;
   onDecrypt: () => void;
   onRequestClose: () => void;
+  onFinalizeClose: () => void;
   decryptPhase: DecryptPhase;
   decryptedValues: Record<string, string> | null;
 }
@@ -101,14 +102,19 @@ function Pipeline({ phase }: { phase: DecryptPhase }) {
 
 export default function BorrowerCard({
   hasPosition, activeTab, setActiveTab, closeStep,
-  loading, fhevmInst, protocolStats, setModal, onDecrypt, onRequestClose,
+  loading, fhevmInst, protocolStats, setModal, onDecrypt, onRequestClose, onFinalizeClose,
   decryptPhase, decryptedValues,
 }: BorrowerCardProps) {
   const renderCloseSection = () => {
     if (closeStep === "pending") return (
-      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 0", borderTop: "1px solid var(--border)" }}>
-        <span className="sl-step-pill pending">&#x23F3; Close Pending</span>
-        <span style={{ fontSize: 12, color: "var(--muted)" }}>Zama relayer is verifying zero-debt &mdash; position will close automatically</span>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "14px 0", borderTop: "1px solid var(--border)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span className="sl-step-pill pending">&#x23F3; Close Pending</span>
+          <span style={{ fontSize: 12, color: "var(--muted)" }}>Debt marked publicly decryptable &mdash; finalize to verify zero and reclaim collateral</span>
+        </div>
+        <button className="sl-btn-warn" onClick={onFinalizeClose} disabled={loading || !fhevmInst}>
+          {loading ? <span className="sl-spinner" /> : "Finalize Close \u2192"}
+        </button>
       </div>
     );
     return (

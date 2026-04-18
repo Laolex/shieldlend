@@ -6,6 +6,7 @@ interface LiquidatorCardProps {
   loading: boolean;
   setModal: (m: ModalType) => void;
   onRequestReveal: (addr: string) => void;
+  onFinalizeReveal: (addr: string) => void;
   onLiquidate: (addr: string) => void;
   onAccrueInterest: (addr: string) => void;
   onEmergencyLiquidate: (addr: string) => void;
@@ -13,7 +14,7 @@ interface LiquidatorCardProps {
 
 export default function LiquidatorCard({
   borrowers, isAdmin, loading, setModal,
-  onRequestReveal, onLiquidate, onAccrueInterest, onEmergencyLiquidate,
+  onRequestReveal, onFinalizeReveal, onLiquidate, onAccrueInterest, onEmergencyLiquidate,
 }: LiquidatorCardProps) {
   const renderEntry = (b: BorrowerEntry) => (
     <div className="sl-borrower-item" key={b.address}>
@@ -36,7 +37,9 @@ export default function LiquidatorCard({
             </button>
           )}
           {b.pendingReveal && !b.confirmedLiq && (
-            <span style={{ fontSize: 11, color: "var(--muted)", padding: "8px 0" }}>Awaiting relayer...</span>
+            <button className="sl-btn-warn" onClick={() => onFinalizeReveal(b.address)} disabled={loading} style={{ fontSize: 11 }}>
+              {loading ? <span className="sl-spinner" /> : "Finalize Reveal \u2192"}
+            </button>
           )}
           {b.confirmedLiq && (
             <button className="sl-btn-danger" onClick={() => onLiquidate(b.address)} disabled={loading}>

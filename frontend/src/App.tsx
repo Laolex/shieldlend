@@ -270,8 +270,28 @@ export default function ShieldLendApp() {
       const tx = await contract.requestClosePosition();
       await tx.wait();
       setCloseStep("pending");
-      showToast("Close requested \u2014 Zama relayer decrypting debt...", "info");
+      showToast("Close requested \u2014 click Finalize to decrypt & verify", "info");
     } catch (e: any) { showToast(e.message?.slice(0, 80), "error"); }
+    setLoading(false);
+  };
+
+  const handleFinalizeClose = async () => {
+    if (!contract || !account) return;
+    if (!fhevmInst) { showToast("FHE offline \u2014 relayer unreachable", "error"); return; }
+    setLoading(true);
+    try {
+      const debtHandle = await contract.getEncryptedTotalDebt(account);
+      const handleHex = typeof debtHandle === "string" ? debtHandle : String(debtHandle);
+      showToast("Decrypting debt via Zama relayer\u2026", "info");
+      const result = await fhevmInst.publicDecrypt([handleHex]);
+      const tx = await contract.verifyAndClose(
+        [handleHex], result.abiEncodedClearValues, result.decryptionProof,
+      );
+      await tx.wait();
+      setCloseStep("idle");
+      setHasPosition(false);
+      showToast("Position closed \u2014 collateral returned");
+    } catch (e: any) { showToast(e.message?.slice(0, 80) ?? "Finalize failed", "error"); }
     setLoading(false);
   };
 
@@ -349,9 +369,28 @@ export default function ShieldLendApp() {
       const tx = await contract.requestLiquidationReveal(addr);
       await tx.wait();
       setBorrowers(prev => prev.map(b => b.address === addr ? { ...b, pendingReveal: true } : b));
-      showToast("Reveal requested \u2014 Zama relayer decrypting...", "info");
+      showToast("Reveal requested \u2014 click Finalize to decrypt & verify", "info");
       if (contract) startPolling(contract);
     } catch (e: any) { showToast(e.message?.slice(0, 80), "error"); }
+    setLoading(false);
+  };
+
+  const handleFinalizeReveal = async (addr: string) => {
+    if (!contract) return;
+    if (!fhevmInst) { showToast("FHE offline \u2014 relayer unreachable", "error"); return; }
+    setLoading(true);
+    try {
+      const liqHandle = await contract.getIsLiquidatable(addr);
+      const handleHex = typeof liqHandle === "string" ? liqHandle : String(liqHandle);
+      showToast("Decrypting liquidation flag via Zama relayer\u2026", "info");
+      const result = await fhevmInst.publicDecrypt([handleHex]);
+      const tx = await contract.verifyLiquidationReveal(
+        addr, [handleHex], result.abiEncodedClearValues, result.decryptionProof,
+      );
+      await tx.wait();
+      showToast("Liquidation flag revealed");
+      if (contract) startPolling(contract);
+    } catch (e: any) { showToast(e.message?.slice(0, 80) ?? "Finalize failed", "error"); }
     setLoading(false);
   };
 
@@ -452,6 +491,7 @@ export default function ShieldLendApp() {
                 fhevmInst={fhevmInst} protocolStats={protocolStats}
                 setModal={setModal} onDecrypt={handleDecrypt}
                 onRequestClose={handleRequestClose}
+                onFinalizeClose={handleFinalizeClose}
                 decryptPhase={decryptPhase}
                 decryptedValues={decryptedValues}
               />
@@ -462,6 +502,7 @@ export default function ShieldLendApp() {
                 borrowers={borrowers} isAdmin={isAdmin} loading={loading}
                 setModal={setModal}
                 onRequestReveal={handleRequestReveal}
+                onFinalizeReveal={handleFinalizeReveal}
                 onLiquidate={handleLiquidate}
                 onAccrueInterest={handleAccrueInterest}
                 onEmergencyLiquidate={handleEmergencyLiquidate}

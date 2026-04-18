@@ -20,7 +20,7 @@
 
 import { ethers } from "hardhat";
 
-const CONTRACT_ADDRESS = process.env.LENDING_CONTRACT ?? "0x8b28B283Fc19A747B2fB69BA4428541a4b8bEafB";
+const CONTRACT_ADDRESS = process.env.LENDING_CONTRACT ?? "0x5b485FF37E2c9C2481A8acCDF3C7F0B365b13796";
 
 // Minimum seconds between accruals for the same borrower (default: 6 hours)
 const MIN_ACCRUAL_INTERVAL = Number(process.env.ACCRUAL_INTERVAL ?? 21600);
